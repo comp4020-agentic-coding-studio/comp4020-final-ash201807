@@ -85,6 +85,13 @@ function shrinkBoard(board: Cell[][]): Cell[][] {
   return next;
 }
 
+// A full 3x3 board always expands (see updateBoard), so this can only ever
+// be true for an already-expanded 5x5 board — a full 3x3 never reaches here
+// with Phase 7 having left it at size 3.
+function isBoardFull(board: Cell[][]): boolean {
+  return board.every((row) => row.every((cell) => cell !== null));
+}
+
 // §11 Phase 7. Runs after every Play that leaves the game active — including
 // a Play that forms no combo at all, since the Main Board can become full
 // (or, after a clear, stop being full) without one. §12: "如果 Combo 只清除
@@ -152,10 +159,13 @@ export function detectCombos(board: Cell[][]): Combo[] {
         if (values.some((v) => v === null)) continue;
         const [a, b, c] = values as PlacedCard[];
 
-        // §8 Combo Definition: same player, same card type, 3 consecutive
-        // cells in one of the directions above.
-        if (a.owner === b.owner && b.owner === c.owner && a.type === b.type && b.type === c.type) {
-          combos.push({ type: a.type, owner: a.owner, cells });
+        // Revised rule (post-playtesting): a Combo only requires the same
+        // owner across 3 consecutive cells in one of the directions above —
+        // card type no longer gates whether a Combo exists at all, only
+        // whether it also carries a same-type bonus effect (sameType below).
+        if (a.owner === b.owner && b.owner === c.owner) {
+          const sameType = a.type === b.type && b.type === c.type ? a.type : null;
+          combos.push({ owner: a.owner, cells, sameType });
         }
       }
     }
@@ -208,17 +218,19 @@ function applyCombos(state: GameState, actingPlayer: PlayerId, random: RandomSou
       return combos;
     }
 
-    // Phase 5: effects, one application per combo — confirmed stacking, so
-    // two simultaneous Lightning combos is two stacked -1 AP hits, two
-    // simultaneous Nature combos is +2 AP this same turn, etc.
+    // Phase 5: effects, one application per combo that also carries a
+    // same-type bonus (a mixed-type combo deals its damage but triggers
+    // nothing here) — confirmed stacking, so two simultaneous same-type
+    // Lightning combos is two stacked -1 AP hits, two simultaneous same-type
+    // Nature combos is +2 AP this same turn, etc.
     for (const combo of combos) {
-      if (combo.type === "lightning") {
+      if (combo.sameType === "lightning") {
         state.pendingLightning[opponent] += 1;
-      } else if (combo.type === "water") {
+      } else if (combo.sameType === "water") {
         for (let i = 0; i < WATER_DRAW_COUNT; i++) {
           state.players[actingPlayer].hand.push(randomCard(random));
         }
-      } else if (combo.type === "nature") {
+      } else if (combo.sameType === "nature") {
         state.ap += NATURE_AP_BONUS;
       }
     }
@@ -231,6 +243,13 @@ function applyCombos(state: GameState, actingPlayer: PlayerId, random: RandomSou
   }
 
   updateBoard(state); // Phase 7
+
+  // Board Locked (playtesting revision): the board can fill up — with or
+  // without a combo on the filling Play — leaving no further Play possible.
+  // Confirmed: no winner is recorded for this, unlike a lethal finish.
+  if (state.status === "active" && isBoardFull(state.board)) {
+    state.status = "locked";
+  }
 
   return combos;
 }

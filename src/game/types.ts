@@ -18,7 +18,11 @@ export interface PlayerState {
   firstTurnTaken: boolean;
 }
 
-export type GameStatus = "active" | "finished";
+// "locked": the board (always 5x5 when this happens — a full 3x3 always
+// expands instead, see updateBoard) has no empty cell left, so no further
+// Play is possible, but neither player reached 0 HP. No winner is recorded
+// (confirmed): this is a draw-like terminal state, not a win.
+export type GameStatus = "active" | "finished" | "locked";
 
 export interface GameState {
   status: GameStatus;
@@ -34,7 +38,11 @@ export interface GameState {
 }
 
 export interface Combo {
-  type: CardType;
   owner: PlayerId;
   cells: Array<[number, number]>;
+  // Set only when all 3 cells also share a card type — that's what gates a
+  // combo's special effect (Lightning/Water/Nature). A combo always forms
+  // and deals damage on owner alone; a mixed-type combo has `sameType: null`
+  // and no effect.
+  sameType: CardType | null;
 }
