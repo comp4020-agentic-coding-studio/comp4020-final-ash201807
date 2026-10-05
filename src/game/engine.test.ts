@@ -319,3 +319,130 @@ describe("combo resolution (section 11 phases)", () => {
     expect(() => drawCard(state, "A")).toThrow(/finished/);
   });
 });
+
+describe("Expansion (section 12)", () => {
+  it("keeps the board at 3x3 while the Main Board is not yet full", () => {
+    const state = makeState({ ap: 2, currentPlayer: "A" });
+    // 7 of 9 cells filled, no existing combo among them.
+    place(state, "A", "fire", 0, 0);
+    place(state, "A", "fire", 0, 1);
+    place(state, "A", "water", 0, 2);
+    place(state, "A", "fire", 1, 0);
+    place(state, "A", "nature", 1, 1);
+    place(state, "A", "fire", 1, 2);
+    place(state, "A", "water", 2, 0);
+    state.players.A.hand = ["fire"];
+
+    playCard(state, "A", 0, 2, 1); // fills the 8th cell (2,1), (2,2) stays empty
+
+    expect(state.board.length).toBe(3);
+  });
+
+  it("expands to a 5x5 board the moment the Main Board becomes full, even with no combo on that Play", () => {
+    const state = makeState({ ap: 2, currentPlayer: "A" });
+    // A 3x3 layout with no 3-in-a-row anywhere, including once the 9th
+    // (2,2)) cell is filled by any card type — verified by inspection of
+    // all 8 lines (3 rows, 3 cols, 2 diagonals).
+    place(state, "A", "fire", 0, 0);
+    place(state, "A", "fire", 0, 1);
+    place(state, "A", "water", 0, 2);
+    place(state, "A", "fire", 1, 0);
+    place(state, "A", "nature", 1, 1);
+    place(state, "A", "fire", 1, 2);
+    place(state, "A", "water", 2, 0);
+    place(state, "A", "fire", 2, 1);
+    state.players.A.hand = ["fire"];
+
+    playCard(state, "A", 0, 2, 2); // fills (2,2), completing the Main Board
+
+    expect(state.board.length).toBe(5);
+    // §12: "原来的 3x3 是 5x5 的中心区域" — the prior contents move to the
+    // center untouched, offset by 1 in both directions.
+    expect(state.board[1][1]).toEqual({ owner: "A", type: "fire" });
+    expect(state.board[3][3]).toEqual({ owner: "A", type: "fire" }); // the just-played (2,2)
+    // The new outer ring is empty.
+    expect(state.board[0][0]).toBeNull();
+    expect(state.board[4][4]).toBeNull();
+  });
+
+  it("detects a combo entirely inside the Expansion ring", () => {
+    const board = emptyBoard(5);
+    // Row 0 is outside the Main Board (rows/cols 1-3) regardless of column.
+    board[0][0] = { owner: "A", type: "water" };
+    board[0][1] = { owner: "A", type: "water" };
+    board[0][2] = { owner: "A", type: "water" };
+
+    expect(detectCombos(board)).toHaveLength(1);
+  });
+
+  it("detects a combo that spans the Main Board and the Expansion ring", () => {
+    const board = emptyBoard(5);
+    // Row 1 is a Main Board row; column 0 on that row is still Expansion.
+    board[1][0] = { owner: "A", type: "nature" }; // Expansion
+    board[1][1] = { owner: "A", type: "nature" }; // Main Board
+    board[1][2] = { owner: "A", type: "nature" }; // Main Board
+
+    expect(detectCombos(board)).toHaveLength(1);
+  });
+
+  it("keeps the Expansion when a combo clears only Expansion cells and the Main Board stays full", () => {
+    const state = makeState({ ap: 2, currentPlayer: "A", board: emptyBoard(5) });
+    // Main Board (rows/cols 1-3) fully occupied, no pre-existing combo.
+    place(state, "A", "fire", 1, 1);
+    place(state, "A", "fire", 1, 2);
+    place(state, "A", "water", 1, 3);
+    place(state, "A", "fire", 2, 1);
+    place(state, "A", "nature", 2, 2);
+    place(state, "A", "fire", 2, 3);
+    place(state, "A", "water", 3, 1);
+    place(state, "A", "fire", 3, 2);
+    place(state, "A", "water", 3, 3);
+    // Two Expansion-only cells (row 0), about to complete a combo that never
+    // touches the Main Board at all.
+    place(state, "A", "water", 0, 0);
+    place(state, "A", "water", 0, 1);
+    state.players.A.hand = ["water"];
+
+    playCard(state, "A", 0, 0, 2); // completes the row-0 Water combo
+
+    expect(state.board.length).toBe(5); // still expanded
+    expect(state.board[0][0]).toBeNull(); // the Expansion combo cleared
+    expect(state.board[1][1]).not.toBeNull(); // Main Board untouched
+  });
+
+  it("shrinks back to 3x3 when a combo clears a Main Board cell, discarding the rest of the Expansion ring", () => {
+    const state = makeState({ ap: 2, currentPlayer: "A", board: emptyBoard(5) });
+    // Main Board (rows/cols 1-3) fully occupied, no pre-existing combo among
+    // these 9 cells, and chosen so that playing (0,1) below forms exactly
+    // one combo (the intended vertical one) and not an incidental diagonal
+    // one through (1,2)/(2,3) as an earlier draft of this fixture did.
+    place(state, "A", "fire", 1, 1);
+    place(state, "A", "water", 1, 2);
+    place(state, "A", "fire", 1, 3);
+    place(state, "A", "fire", 2, 1);
+    place(state, "A", "nature", 2, 2);
+    place(state, "A", "water", 2, 3);
+    place(state, "A", "water", 3, 1);
+    place(state, "A", "fire", 3, 2);
+    place(state, "A", "nature", 3, 3);
+    // An unrelated card sitting elsewhere in the ring — expected to simply
+    // vanish once the board shrinks, per instruction: no hidden persistence.
+    place(state, "A", "lightning", 4, 4);
+    state.players.A.hand = ["fire"];
+
+    // (0,1) is Expansion; completing it forms a vertical Fire combo through
+    // two Main Board cells, (1,1) and (2,1).
+    playCard(state, "A", 0, 0, 1);
+
+    expect(state.board.length).toBe(3); // Main Board no longer full -> shrunk
+    // The cleared Main cells (old (1,1), (2,1)) map to new (0,0) and (1,0).
+    expect(state.board[0][0]).toBeNull();
+    expect(state.board[1][0]).toBeNull();
+    // The untouched Main cells survive, shifted back by the same offset.
+    expect(state.board[0][1]).toEqual({ owner: "A", type: "water" }); // old (1,2)
+    expect(state.board[2][0]).toEqual({ owner: "A", type: "water" }); // old (3,1)
+    // Only a 3x3 grid exists now — the old (4,4) card has no cell to live in.
+    expect(state.board.length).toBe(3);
+    expect(state.board.every((row) => row.length === 3)).toBe(true);
+  });
+});

@@ -5,7 +5,8 @@
 import { randomCard, pickFirstPlayer, type RandomSource } from "./rng.ts";
 import type { Cell, Combo, GameState, PlacedCard, PlayerId } from "./types.ts";
 
-const BOARD_SIZE = 3;
+const MAIN_BOARD_SIZE = 3;
+const EXPANSION_BOARD_SIZE = 5;
 const STARTING_HP = 100;
 const STARTING_HAND_SIZE = 3;
 const NORMAL_TURN_AP = 2;
@@ -17,8 +18,10 @@ const WATER_DRAW_COUNT = 2;
 const NATURE_AP_BONUS = 1;
 
 // Each line direction scanned once from every cell, so a run of 3 is found
-// exactly once and a run of 4+ (possible once the 5x5 Expansion lands) is
-// found as its overlapping 3-windows — the reading confirmed for §8/§9.
+// exactly once and a run of 4+ is found as its overlapping 3-windows — the
+// reading confirmed for §8/§9. This never special-cases Main vs. Expansion:
+// once expanded, the 5x5 grid is "一个连续棋盘" (§12), so a combo spanning
+// both regions is just an ordinary line on a bigger board.
 const DIRECTIONS: ReadonlyArray<[number, number]> = [
   [0, 1], // horizontal
   [1, 0], // vertical
@@ -28,12 +31,73 @@ const DIRECTIONS: ReadonlyArray<[number, number]> = [
 
 const otherPlayer = (id: PlayerId): PlayerId => (id === "A" ? "B" : "A");
 
-// Board size is a parameter here and in detectCombos on purpose: the
-// Expansion (3x3 -> 5x5, spec §12) is out of scope for this stage, but the
-// detection algorithm already works on any square grid, so growing the board
-// later is a board-management change, not a combo-detection rewrite.
+// Board size is a parameter here and in detectCombos on purpose: growing the
+// board (3x3 -> 5x5, §12) is a board-management change, not a
+// combo-detection rewrite — detectCombos never needed to change for it.
 function emptyBoard(size: number): Cell[][] {
   return Array.from({ length: size }, () => Array.from({ length: size }, (): Cell => null));
+}
+
+// The Main Board is always the centered 3x3 region of whichever grid is
+// currently active: offset 0 when the board itself is 3x3, offset 1 once
+// it's the 5x5 Expansion grid.
+function mainBoardOffset(size: number): number {
+  return (size - MAIN_BOARD_SIZE) / 2;
+}
+
+function isMainBoardFull(board: Cell[][]): boolean {
+  const offset = mainBoardOffset(board.length);
+  for (let r = offset; r < offset + MAIN_BOARD_SIZE; r++) {
+    for (let c = offset; c < offset + MAIN_BOARD_SIZE; c++) {
+      if (board[r][c] === null) return false;
+    }
+  }
+  return true;
+}
+
+// §12: "原来的 3x3 是 5x5 的中心区域" — the existing Main Board cells are
+// copied in place at the center of a fresh 5x5 grid; everything else starts
+// empty.
+function expandBoard(board: Cell[][]): Cell[][] {
+  const next = emptyBoard(EXPANSION_BOARD_SIZE);
+  const offset = mainBoardOffset(EXPANSION_BOARD_SIZE);
+  for (let r = 0; r < MAIN_BOARD_SIZE; r++) {
+    for (let c = 0; c < MAIN_BOARD_SIZE; c++) {
+      next[r + offset][c + offset] = board[r][c];
+    }
+  }
+  return next;
+}
+
+// §12 Expansion Removal: once the Main Board stops being full, the
+// Expansion disappears. Per explicit direction, whatever was still sitting
+// in the outer ring is simply discarded here — it is not carried forward as
+// hidden state for a possible future re-expansion, since the specification
+// does not say it should be.
+function shrinkBoard(board: Cell[][]): Cell[][] {
+  const offset = mainBoardOffset(board.length);
+  const next = emptyBoard(MAIN_BOARD_SIZE);
+  for (let r = 0; r < MAIN_BOARD_SIZE; r++) {
+    for (let c = 0; c < MAIN_BOARD_SIZE; c++) {
+      next[r][c] = board[r + offset][c + offset];
+    }
+  }
+  return next;
+}
+
+// §11 Phase 7. Runs after every Play that leaves the game active — including
+// a Play that forms no combo at all, since the Main Board can become full
+// (or, after a clear, stop being full) without one. §12: "如果 Combo 只清除
+// 了 Expansion 的牌，而 Main Board 仍然满: Expansion 保持存在" — so this
+// only reacts to the Main Board's own fullness, never the whole grid's.
+function updateBoard(state: GameState): void {
+  const size = state.board.length;
+  const mainFull = isMainBoardFull(state.board);
+  if (size === MAIN_BOARD_SIZE && mainFull) {
+    state.board = expandBoard(state.board);
+  } else if (size === EXPANSION_BOARD_SIZE && !mainFull) {
+    state.board = shrinkBoard(state.board);
+  }
 }
 
 function beginTurn(state: GameState): void {
@@ -117,49 +181,56 @@ function unionCells(combos: Combo[]): Array<[number, number]> {
 
 // §11 Combo Resolution, phases 1-7. Detect is detectCombos() above; this
 // function runs Calculate through Update Board for one Play.
+//
+// Phase 7 (updateBoard) must run even when this Play formed no combo at all
+// — the spec frames phases 1-7 as running "每次 Play 后" (after every Play),
+// and the Main Board can become full, or stop being full, without a combo
+// (e.g. the Play that fills its very last empty cell). Only phases 2-6
+// (damage, win check, effects, clearing) are conditional on combos existing;
+// a lethal Play (phase 4) still skips 5-7 entirely, combo count aside.
 function applyCombos(state: GameState, actingPlayer: PlayerId, random: RandomSource): Combo[] {
   const combos = detectCombos(state.board); // Phase 1
-  if (combos.length === 0) return combos;
 
-  const opponent = otherPlayer(actingPlayer);
+  if (combos.length > 0) {
+    const opponent = otherPlayer(actingPlayer);
 
-  // Phase 2 + 3: every combo deals a flat 15 (the attack values in §4 are all
-  // 5, times 3 cards), all combos from this Play summed and applied at once.
-  const damage = combos.length * COMBO_DAMAGE;
-  state.players[opponent].hp -= damage;
+    // Phase 2 + 3: every combo deals a flat 15 (the attack values in §4 are
+    // all 5, times 3 cards), all combos from this Play summed and applied at
+    // once.
+    const damage = combos.length * COMBO_DAMAGE;
+    state.players[opponent].hp -= damage;
 
-  // Phase 4: a lethal HP ends the game immediately — Phases 5-7 (effects,
-  // clearing, board/expansion update) do not run on the finishing Play.
-  if (state.players[opponent].hp <= 0) {
-    state.status = "finished";
-    state.winner = actingPlayer;
-    return combos;
-  }
+    // Phase 4: a lethal HP ends the game immediately — Phases 5-7 (effects,
+    // clearing, board/expansion update) do not run on the finishing Play.
+    if (state.players[opponent].hp <= 0) {
+      state.status = "finished";
+      state.winner = actingPlayer;
+      return combos;
+    }
 
-  // Phase 5: effects, one application per combo — confirmed stacking, so two
-  // simultaneous Lightning combos is two stacked -1 AP hits, two simultaneous
-  // Nature combos is +2 AP this same turn, etc.
-  for (const combo of combos) {
-    if (combo.type === "lightning") {
-      state.pendingLightning[opponent] += 1;
-    } else if (combo.type === "water") {
-      for (let i = 0; i < WATER_DRAW_COUNT; i++) {
-        state.players[actingPlayer].hand.push(randomCard(random));
+    // Phase 5: effects, one application per combo — confirmed stacking, so
+    // two simultaneous Lightning combos is two stacked -1 AP hits, two
+    // simultaneous Nature combos is +2 AP this same turn, etc.
+    for (const combo of combos) {
+      if (combo.type === "lightning") {
+        state.pendingLightning[opponent] += 1;
+      } else if (combo.type === "water") {
+        for (let i = 0; i < WATER_DRAW_COUNT; i++) {
+          state.players[actingPlayer].hand.push(randomCard(random));
+        }
+      } else if (combo.type === "nature") {
+        state.ap += NATURE_AP_BONUS;
       }
-    } else if (combo.type === "nature") {
-      state.ap += NATURE_AP_BONUS;
+    }
+
+    // Phase 6: clear every cell that took part in any combo this Play (the
+    // union, so a shared card is cleared once, not twice).
+    for (const [r, c] of unionCells(combos)) {
+      state.board[r][c] = null;
     }
   }
 
-  // Phase 6: clear every cell that took part in any combo this Play (the
-  // union, so a shared card is cleared once, not twice).
-  for (const [r, c] of unionCells(combos)) {
-    state.board[r][c] = null;
-  }
-
-  // Phase 7 (Expansion appear/disappear) is out of scope for this stage —
-  // detectCombos and the board are already size-agnostic, so this is where
-  // that check slots in later without reshaping the engine.
+  updateBoard(state); // Phase 7
 
   return combos;
 }
@@ -174,7 +245,7 @@ export function createInitialState(random: RandomSource = Math.random): GameStat
       A: { id: "A", hp: STARTING_HP, hand: makeHand(), firstTurnTaken: false },
       B: { id: "B", hp: STARTING_HP, hand: makeHand(), firstTurnTaken: false },
     },
-    board: emptyBoard(BOARD_SIZE),
+    board: emptyBoard(MAIN_BOARD_SIZE),
     currentPlayer: firstPlayer,
     firstPlayer,
     ap: 0,
