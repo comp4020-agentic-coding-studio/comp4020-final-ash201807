@@ -204,16 +204,54 @@ No build step: `node src/server/index.ts` runs the TypeScript source
 directly (Node 24's native type-stripping), matching the "no bundler" stack
 decision. `PORT` and `DB_PATH` are read from the environment; `DB_PATH`
 defaults to `/data/game.db` (the Fly volume) and is overridden for local
-runs, where `/data` doesn't exist. The `Dockerfile` now builds a
-`node:24-alpine` image, installs only production dependencies (`ws`), and
-runs the same command — the busybox placeholder is gone. The actual Fly
-deploy of this image hasn't been verified yet (no Docker available in this
-environment); that happens at the deploy stage.
+runs, where `/data` doesn't exist. The `Dockerfile` builds a `node:24-alpine`
+image, installs only production dependencies (`ws` — its optional native
+addons, `bufferutil`/`utf-8-validate`, are confirmed unresolved, so nothing
+needs compiling), and runs the same command — the busybox placeholder is
+gone.
+
+## Stage 4 — deployed to Fly, verified live
+
+`flyctl deploy --remote-only --ha=false -a comp4020-final-ash201807` shipped
+the Stage 3 image. The build succeeded on Fly's remote builder with no local
+Docker needed, confirming `node:sqlite` works on Alpine without extra setup.
+Live at https://comp4020-final-ash201807.fly.dev/.
+
+**Naming mismatch found while checking app status before deploying**: both
+`fly.toml`'s own comment and `.github/workflows/checks.yml`'s deploy job
+assume the Fly app name is identical to the GitHub repo name
+(`comp4020-final-aSH201807`). Fly app names are lowercase-only, so the actual
+provisioned app is `comp4020-final-ash201807` — `flyctl status -a
+comp4020-final-aSH201807` (the repo's exact casing) fails to find it, while
+the lowercase form works. `fly.toml` and the CI workflow are course-fixed
+files, not edited here; flagged as a risk to check specifically once the repo
+goes public and the workflow's own `-a ${{ github.event.repository.name }}`
+deploy step runs for real — it may need the same lowercase form to find the
+app.
+
+**Verified against the live deployment, not just locally**:
+- `/` and `/readme/` both 200, `spec/`'s fixed checks pass against
+  `https://comp4020-final-ash201807.fly.dev`
+- the two-client WS script passes against the same live URL: pairing,
+  server-pushed sync to the non-acting client, hand updates, third-connection
+  rejection, out-of-turn rejection
+- persistence across a **real** restart, not a simulated one: read the
+  live `/data/game.db` row via `flyctl ssh console`, ran `flyctl machine
+  restart`, read it again — session map and the drawn card's presence in the
+  hand were identical before and after, confirming §17 on the actual
+  deployed volume
+
+**Known state to clean up before real use**: the two verification runs above
+occupied both player slots on the one live game with test sessions. Left in
+place for now (more stages still to land); must be cleared — delete the one
+row in `/data/game.db`, or the whole file, via `flyctl ssh console` — before
+a real crit audience or classmate visits the URL, since `joinSession` has no
+way to tell a real player from the earlier debug client once a session is
+taken.
 
 ### Not yet built
 
 The real client UI (the current one is a bare debug page — no styling, no
-design, built only to exercise the server), the 5x5 Expansion in that UI,
-and an actual Fly deployment of this server. These are later stages of this
-same process account — this file is rewritten, not appended to, as each
-stage lands.
+design, built only to exercise the server) and the 5x5 Expansion in that UI.
+These are later stages of this same process account — this file is
+rewritten, not appended to, as each stage lands.
