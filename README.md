@@ -3,36 +3,38 @@
 ## What this is
 
 Two players share a 3x3 board (growing to 5x5 once it fills). Each turn you
-place a card from your hand — Fire, Lightning, Water or Nature — trying to
-line three of your own cards up in a row, column or diagonal. A completed
-line hits your opponent and triggers that card's effect: Lightning steals AP
-from their next turn, Water refills your hand, Nature gives you another
-action right now. First to 0 HP loses. The rules themselves are fixed by a
-specification agreed before any code was written (`CLAUDE.md` says how it's
-used); what to build on top of it was mine to decide.
+place a card from your hand — Fire, Lightning, Water or Nature. Three of your
+cards in a row, column or diagonal is a Combo regardless of type, and always
+deals damage; if all three also share a type, it additionally triggers that
+type's effect — Lightning steals AP from the opponent's next turn, Water
+refills your hand, Nature grants another action right now. First to 0 HP
+loses outright; a board that fills up with neither player dead locks
+instead, with no winner. Either ending needs both players to confirm a new
+game before one starts — wanting a rematch doesn't reset it out from under
+the other. The rules are fixed by a specification, revised once after real
+two-player playtesting, agreed before this code was written; what to build
+on top was mine to decide.
 
 ## What good means here
 
 Before deciding, I read the brief's own pointers: "the small web, games made
-for a handful of friends, tools built for one workshop." Those three share a
-shape — software built for a specific, small audience who already know each
-other, with no attempt to scale past that. This game is exactly that shape:
-built for two named people, not a matchmaking pool, with no reason to exist
-for a crowd.
+for a handful of friends, tools built for one workshop" — software built for
+a small audience who already know each other, with no attempt to scale past
+that. This game is exactly that shape: built for two named people, not a
+matchmaking pool.
 
 Given that, good means:
 
 1. **The server is the only authority.** Neither browser decides whose turn
-   it is, whether a line of three is real, or who won — AP, combo detection
-   and the win condition all run server-side; the client only renders what
-   it's told. A two-player game where one side could plausibly cheat isn't
-   worth trusting with a friend.
+   it is, whether a line is a real Combo, who won, or whether a restart was
+   agreed to — the client only renders what it's told. A game where one side
+   could cheat, or reset the other's alone, isn't worth trusting with a
+   friend.
 
 2. **Nothing is lost by stepping away.** A reload, a dropped connection, a
-   server restart — none of them should cost either player their place in
-   the game. For two friends playing across a slow afternoon rather than a
-   ranked match, losing progress to a flaky connection is the thing most
-   likely to kill the experience.
+   server restart — none of them should cost either player their place in the
+   game, since a flaky connection losing progress is the likeliest thing to
+   kill a casual game between friends.
 
 3. **The state is always legible, not just correct.** At a glance, both
    players should be able to tell whose turn it is, how much AP is left, and
@@ -40,25 +42,26 @@ Given that, good means:
    to the people using it isn't good by this app's own standard, even with
    every `spec/` check green.
 
-4. **It stays small on purpose.** No accounts, no matchmaking, no
-   leaderboard, no chat. One game exists at a time; a third visitor is turned
-   away rather than offered a lesser spectator role. Any of those would serve
-   a bigger audience than the one this app is built for.
+4. **It stays small on purpose.** No accounts, matchmaking, leaderboard, or
+   chat. One game exists at a time; a third visitor is turned away rather
+   than given a lesser spectator role — any of that would serve a bigger
+   audience than this app is built for.
 
 ## Checked vs. judged
 
 Checked in `spec/`, against the real running app: a third visitor is told the
-game is full and cannot affect it; an out-of-turn action is rejected and
-changes nothing; reconnecting with the same session (closing and reopening a
-socket, the same thing a reload does) resumes the same game rather than
-losing it. Checked in `src/game/engine.test.ts`, against the rules engine in
-isolation: AP costs, every combo direction, damage and effect stacking, and
-the Expansion all match the specification exactly — random card draws make
-these impractical to pin down through the live HTTP/WebSocket surface, so
-they're checked at the layer that can actually control them.
+game is full; an out-of-turn action, and confirming a new game mid-match, are
+rejected and change nothing; reconnecting with the same session resumes the
+game rather than losing it. Checked in `src/game/engine.test.ts`, against the
+rules engine directly: AP costs, every Combo direction and type combination,
+damage and effect stacking, the Expansion, Board Locked, and restart
+confirmation all match the specification — reaching a real finished or
+locked game, or controlling which cards complete a Combo, isn't practical
+over a live, randomly-dealt game, so these are checked where that control
+exists.
 
 Judged, not checked: whether the board is genuinely legible at a glance
-(point 3) is a human call the current debug client doesn't attempt — it
-renders state correctly but makes no effort to look clear, since the real
-visual design is a later stage of this process. Whether two people actually
-enjoy playing it is likewise not something a test can answer.
+(point 3) — the current debug client renders state correctly but makes no
+effort to look clear, since real visual design is a later stage. Whether two
+people actually enjoy playing it is likewise not something a test can
+answer.
