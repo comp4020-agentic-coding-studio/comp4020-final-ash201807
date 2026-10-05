@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createInitialState, detectCombos, drawCard, endTurn, playCard } from "./engine.ts";
+import { confirmNewGame, createInitialState, detectCombos, drawCard, endTurn, playCard } from "./engine.ts";
 import type { RandomSource } from "./rng.ts";
 import type { CardType, Cell, GameState, PlayerId } from "./types.ts";
 
@@ -29,6 +29,7 @@ function makeState(overrides: Partial<GameState> = {}): GameState {
     ap: 2,
     pendingLightning: { A: 0, B: 0 },
     winner: null,
+    restartConfirmed: { A: false, B: false },
     ...overrides,
   };
 }
@@ -544,5 +545,46 @@ describe("Board Locked", () => {
     expect(() => endTurn(state, "B")).toThrow();
     state.players.B.hand = ["fire"];
     expect(() => playCard(state, "B", 0, 0, 0)).toThrow();
+  });
+});
+
+describe("New Game / restart confirmation", () => {
+  it("rejects confirmation while the game is still active", () => {
+    const state = makeState({ status: "active" });
+    expect(() => confirmNewGame(state, "A")).toThrow(/active/);
+  });
+
+  it("does not reset the game when only one player has confirmed", () => {
+    const state = makeState({ status: "finished", winner: "A" });
+    const result = confirmNewGame(state, "A");
+
+    expect(result).toBe(state); // same object: one confirmation never resets
+    expect(result.restartConfirmed).toEqual({ A: true, B: false });
+    expect(result.status).toBe("finished");
+    expect(result.winner).toBe("A");
+  });
+
+  it("creates a genuinely fresh game once both players have confirmed", () => {
+    const state = makeState({ status: "locked", winner: null });
+    // Give the old game some state that must NOT survive into the new one.
+    state.players.A.hp = 5;
+    state.players.A.hand = ["fire", "fire"];
+    state.pendingLightning.B = 1;
+
+    confirmNewGame(state, "A");
+    const result = confirmNewGame(state, "B", queueRandom([0.1, 0, 0, 0, 0, 0, 0]));
+
+    expect(result).not.toBe(state); // a wholly new object, not the old one mutated
+    expect(result.status).toBe("active");
+    expect(result.winner).toBeNull();
+    expect(result.players.A.hp).toBe(100);
+    expect(result.players.A.hand).toHaveLength(3);
+    expect(result.pendingLightning).toEqual({ A: 0, B: 0 });
+    expect(result.restartConfirmed).toEqual({ A: false, B: false });
+    expect(result.board.length).toBe(3);
+    expect(result.board.every((row) => row.every((cell) => cell === null))).toBe(true);
+    // The usual first-turn exception still applies to the fresh game.
+    expect(result.firstPlayer).toBe("A");
+    expect(result.ap).toBe(1);
   });
 });

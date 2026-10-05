@@ -270,6 +270,7 @@ export function createInitialState(random: RandomSource = Math.random): GameStat
     ap: 0,
     pendingLightning: { A: 0, B: 0 },
     winner: null,
+    restartConfirmed: { A: false, B: false },
   };
 
   beginTurn(state);
@@ -326,5 +327,29 @@ export function endTurn(state: GameState, playerId: PlayerId): GameState {
   // scratch for whoever goes next.
   advanceTurn(state);
   settleZeroApTurns(state);
+  return state;
+}
+
+// New Game / restart (playtesting revision). Only callable once the current
+// game has ended (Game Over or Board Locked) — confirming mid-game is
+// rejected, same as any other action. One player's confirmation alone never
+// resets anything; it just records that this player is ready. Only once
+// both have confirmed does this return a genuinely NEW GameState (random
+// first player, 3-card hands, 100 HP, 3x3 board, fresh AP, cleared pending
+// Lightning) — the caller must use the returned reference, not assume the
+// passed-in `state` was mutated in place, since in that case it wasn't: the
+// old object is discarded entirely. Player/session identity is a
+// server-level concern untouched by this function either way.
+export function confirmNewGame(
+  state: GameState,
+  playerId: PlayerId,
+  random: RandomSource = Math.random,
+): GameState {
+  if (state.status === "active") throw new Error("cannot start a new game while this one is still active");
+
+  state.restartConfirmed[playerId] = true;
+  if (state.restartConfirmed.A && state.restartConfirmed.B) {
+    return createInitialState(random);
+  }
   return state;
 }

@@ -35,6 +35,10 @@ export interface GameState {
   // consumed by) that player's own next turn only.
   pendingLightning: Record<PlayerId, number>;
   winner: PlayerId | null;
+  // New Game confirmations (playtesting revision): only meaningful once
+  // status is "finished" or "locked". Both must be true before a fresh game
+  // replaces this one — one player confirming alone must not reset it.
+  restartConfirmed: Record<PlayerId, boolean>;
 }
 
 export interface Combo {
