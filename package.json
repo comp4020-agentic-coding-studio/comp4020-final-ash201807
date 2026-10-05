@@ -8,16 +8,21 @@
     "check": "pnpm typecheck && pnpm test:engine && pnpm test",
     "check:evidence": "node scripts/check-evidence.ts",
     "test": "vitest run",
-    "test:engine": "vitest run --config vitest.engine.config.ts"
+    "test:engine": "vitest run --config vitest.engine.config.ts",
+    "start": "node src/server/index.ts"
   },
   "devDependencies": {
     "@types/jsdom": "^30.0.0",
     "@types/node": "^24.0.0",
+    "@types/ws": "^8.18.2",
     "jsdom": "^30.1.0",
     "typescript": "^6.0.3",
     "vitest": "^5.0.1"
   },
   "engines": {
     "pnpm": ">=11"
+  },
+  "dependencies": {
+    "ws": "^8.22.0"
   }
 }

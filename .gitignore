@@ -2,6 +2,9 @@ node_modules/
 dist/
 *.log
 
+# local SQLite data for `pnpm start` outside the Fly volume (DB_PATH)
+data/
+
 # editor and OS junk
 .DS_Store
 ._*

@@ -128,9 +128,92 @@ spanning the Main Board and the ring, the Expansion persisting through an
 Expansion-only clear, and the shrink-and-discard case above. All 26 tests
 (20 + 6) pass; `pnpm typecheck` is clean.
 
+## Stage 3 — server, persistence, realtime, session identity, debug client
+
+`src/game/` wasn't touched. Everything new lives in `src/server/` plus a
+plain, unstyled `client/` used only to manually verify the server (the real
+UI is a later stage).
+
+### Session identity (`src/server/sessions.ts`, `cookies.ts`)
+
+An HttpOnly cookie (`session_id`, set on first HTTP visit) is the only
+identity mechanism — no accounts, no login. `joinSession` is a pure function
+over a `{ sessionId -> "A" | "B" }` map: the first two distinct session ids
+become Player A and Player B in arrival order, a session id already assigned
+gets its existing slot back (a reload or reconnect), and a third (or later)
+distinct id is rejected — `{ kind: "full" }` — with no spectator seat, per
+explicit instruction. 6 unit tests cover this directly.
+
+**Bug found and fixed while verifying this stage**: the HTTP `GET /` handler
+originally called the slot-assigning logic on every uncookied request, so
+`spec/`'s own health-check fetches (`global-setup.ts`'s readiness poll and
+the "answers at /" test, both plain `fetch()` calls with no cookie) silently
+consumed both player seats themselves — running `pnpm check` alone made the
+game look full to the first two real browsers that showed up after.
+Session assignment is now split in two: `ensureSessionCookie` (HTTP `GET /`,
+just guarantees a cookie exists) and `joinAndResolveSession` (WebSocket
+connect only, the actual "I'm here to play" signal and the only place a
+player slot is claimed). Re-verified after the fix: `pnpm test` against a
+live server leaves the session table empty, and a real two-client run still
+pairs correctly.
+
+### Persistence (`src/server/persistence.ts`, `node:sqlite`)
+
+One row, one JSON blob: `{ sessions, game: GameState | null }`, written after
+every mutation and loaded once at startup. A relational schema would model
+nothing a single ever-running game needs; the brief itself says to start from
+the smallest schema that can carry the core interaction. `game` is `null`
+until the second session joins, at which point `createInitialState()` runs
+and gets persisted — the single-game, no-rooms, auto-start design confirmed
+back in Stage 1.
+
+Verified directly, not just by reading the code: started the server, paired
+two WebSocket clients, played a Draw, killed the process, restarted it
+against the same SQLite file, and confirmed (a) a brand-new connection with
+no cookie is still told `full` (the session map survived) and (b) reading the
+row straight out of SQLite shows the drawn card still in the player's hand
+(the game state survived) — §17's "across ... server restart" requirement.
+
+### Realtime (`src/server/server.ts`, `ws`)
+
+One WebSocket endpoint (`/ws`). On connect: `assigned` (which player), then
+either `waiting` (game not started) or the full `state`. After any accepted
+action (`play` / `draw` / `endTurn`) the server persists and pushes the full
+`state` — not a diff — to every open socket; a rejected action (wrong turn,
+not enough AP, occupied cell, etc. — the engine's own errors, unchanged from
+Stage 1/2) sends `error` to only the socket that sent it. A third connection
+gets `full` and is closed immediately.
+
+**Second bug found and fixed during verification**: when the second player's
+connection completes the pair, the game is created inside that connection's
+own handler — the first player's *already-open* socket, still sitting on
+`waiting`, was never told. Fixed by broadcasting the fresh state to every
+open socket (not just sending to the new one) whenever a connection is the
+one that completes the pair.
+
+Verified with a real two-client script (`scripts/manual-ws-check.mjs`, not
+part of `pnpm check` — a manual aid, documented as such in its own header):
+both clients receive state once paired; a Draw by one is pushed to the
+*other* client without it acting (proving server-push, not an echo to the
+sender); hand size updates correctly; a third connection is rejected; an
+out-of-turn action produces an `error` and changes nothing.
+
+### Running it
+
+No build step: `node src/server/index.ts` runs the TypeScript source
+directly (Node 24's native type-stripping), matching the "no bundler" stack
+decision. `PORT` and `DB_PATH` are read from the environment; `DB_PATH`
+defaults to `/data/game.db` (the Fly volume) and is overridden for local
+runs, where `/data` doesn't exist. The `Dockerfile` now builds a
+`node:24-alpine` image, installs only production dependencies (`ws`), and
+runs the same command — the busybox placeholder is gone. The actual Fly
+deploy of this image hasn't been verified yet (no Docker available in this
+environment); that happens at the deploy stage.
+
 ### Not yet built
 
-Server, persistence, session/player identity, the client UI, and deployment
-of an actual game (the Dockerfile still serves the starter placeholder).
-These are later stages of this same process account — this file is
-rewritten, not appended to, as each stage lands.
+The real client UI (the current one is a bare debug page — no styling, no
+design, built only to exercise the server), the 5x5 Expansion in that UI,
+and an actual Fly deployment of this server. These are later stages of this
+same process account — this file is rewritten, not appended to, as each
+stage lands.
