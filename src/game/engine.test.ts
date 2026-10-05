@@ -101,17 +101,45 @@ describe("turn and AP rules", () => {
 });
 
 describe("combo detection", () => {
-  it("finds a horizontal combo but not a same-type combo split across two owners", () => {
+  it("finds an Owner Combo (same owner, same type) as a single Combo object", () => {
     const board = emptyBoard();
     board[0][0] = { owner: "A", type: "fire" };
     board[0][1] = { owner: "A", type: "fire" };
     board[0][2] = { owner: "A", type: "fire" };
-    expect(detectCombos(board)).toHaveLength(1);
 
-    // Game Specification v1.0 section 8: "Fire-A Fire-A Fire-A" is valid,
-    // but "Fire-A Fire-B Fire-A" is not: same type alone is not enough, all
-    // three cells must share an owner.
+    // One line satisfying both the owner and type conditions still produces
+    // exactly one Combo (ownerMatch: true, sameType: "fire") — applyCombos'
+    // damage formula reads ownerMatch alone for a 15 (never 15+5=20); see
+    // "applies 15 damage..." below for the numeric confirmation.
+    const combos = detectCombos(board);
+    expect(combos).toHaveLength(1);
+    expect(combos[0].ownerMatch).toBe(true);
+    expect(combos[0].sameType).toBe("fire");
+  });
+
+  it("finds a Type Combo across two owners (2nd playtesting revision)", () => {
+    // Superseded reading of Game Specification v1.0 section 8: this exact
+    // "Fire-A Fire-B Fire-A" shape was ruled invalid under the original
+    // same-owner+same-type-only rule. The 2nd revision explicitly makes this
+    // a Combo in its own right (a Type Combo, mixed owner) — confirmed by
+    // the project owner, not assumed.
+    const board = emptyBoard();
+    board[0][0] = { owner: "A", type: "fire" };
     board[0][1] = { owner: "B", type: "fire" };
+    board[0][2] = { owner: "A", type: "fire" };
+
+    const combos = detectCombos(board);
+    expect(combos).toHaveLength(1);
+    expect(combos[0].ownerMatch).toBe(false);
+    expect(combos[0].sameType).toBe("fire");
+  });
+
+  it("finds no Combo when neither owner nor type match across a line", () => {
+    const board = emptyBoard();
+    board[0][0] = { owner: "A", type: "fire" };
+    board[0][1] = { owner: "B", type: "water" };
+    board[0][2] = { owner: "A", type: "nature" };
+
     expect(detectCombos(board)).toHaveLength(0);
   });
 
@@ -351,18 +379,111 @@ describe("combo resolution (section 11 phases)", () => {
   });
 });
 
-// A verified "no accidental combo" owner layout for a fully-occupied 3x3
-// region — a classic filled tic-tac-toe draw board: no 3 consecutive cells,
-// in any row, column or diagonal, share an owner. Confirmed by inspection of
-// all 8 lines. Under the revised Combo rule (owner alone, §6a) this is what
-// "full but combo-free" now requires — a single owner can no longer fill a
-// region without every line in it becoming a Combo, so these fixtures must
-// vary owner, not card type (which is why card type below is uniformly
-// "fire" throughout: it no longer affects whether a Combo exists at all).
+describe("mixed-owner Type Combo (2nd playtesting revision)", () => {
+  it("deals only 5 damage for a mixed-owner Type Combo, credited to whoever completed it", () => {
+    const state = makeState({ ap: 2, currentPlayer: "A" });
+    place(state, "A", "fire", 0, 0);
+    place(state, "B", "fire", 0, 1);
+    state.players.A.hand = ["fire"];
+
+    playCard(state, "A", 0, 0, 2); // A completes A-fire/B-fire/A-fire
+
+    expect(state.players.B.hp).toBe(95); // 100 - 5, not the 15 an Owner Combo deals
+    expect(state.players.A.hp).toBe(100); // the trigger player takes no damage
+  });
+
+  it("credits the Type Combo to whichever player actually completes it", () => {
+    const state = makeState({ ap: 2, currentPlayer: "B" });
+    place(state, "A", "fire", 0, 0);
+    place(state, "B", "fire", 0, 1);
+    state.players.B.hand = ["fire"];
+
+    playCard(state, "B", 0, 0, 2); // B completes A-fire/B-fire/B-fire this time
+
+    expect(state.players.A.hp).toBe(95); // B dealt the damage, to A, this time
+    expect(state.players.B.hp).toBe(100);
+  });
+
+  it("forms an Owner Combo and a Type Combo simultaneously from one Play, summing their damage", () => {
+    const state = makeState({ ap: 2, currentPlayer: "A" });
+    // Row 0 (mixed type, owner A throughout): an Owner Combo once completed.
+    place(state, "A", "fire", 0, 0);
+    place(state, "A", "water", 0, 2);
+    // Column 1 (mixed owner, type lightning throughout): a Type Combo once
+    // completed by the same Play.
+    place(state, "B", "lightning", 1, 1);
+    place(state, "B", "lightning", 2, 1);
+    state.players.A.hand = ["lightning"];
+
+    playCard(state, "A", 0, 0, 1); // (0,1): completes both lines at once
+
+    expect(state.players.B.hp).toBe(80); // 100 - (15 Owner Combo + 5 Type Combo)
+    expect(state.pendingLightning.B).toBe(1); // the Type Combo's Lightning effect fired
+  });
+
+  it("ends the game immediately when a mixed-owner Type Combo's damage is lethal", () => {
+    const state = makeState({ ap: 2, currentPlayer: "A" });
+    state.players.B.hp = 5; // exactly lethal from one Type Combo's 5 damage
+    place(state, "A", "fire", 0, 0);
+    place(state, "B", "fire", 0, 1);
+    state.players.A.hand = ["fire"];
+
+    playCard(state, "A", 0, 0, 2);
+
+    expect(state.status).toBe("finished");
+    expect(state.winner).toBe("A");
+  });
+
+  it("a mixed-owner Lightning Type Combo still reduces the opponent's next turn AP", () => {
+    const state = makeState({ ap: 2, currentPlayer: "A" });
+    place(state, "A", "lightning", 0, 0);
+    place(state, "B", "lightning", 0, 1);
+    state.players.A.hand = ["lightning"];
+
+    playCard(state, "A", 0, 0, 2);
+
+    expect(state.pendingLightning.B).toBe(1);
+  });
+
+  it("a mixed-owner Water Type Combo still draws 2 cards for whoever completed it", () => {
+    const state = makeState({ ap: 2, currentPlayer: "A" });
+    place(state, "A", "water", 0, 0);
+    place(state, "B", "water", 0, 1);
+    state.players.A.hand = ["water"];
+
+    playCard(state, "A", 0, 0, 2);
+
+    expect(state.players.A.hand).toHaveLength(2); // emptied by the play, +2 from Water
+  });
+
+  it("a mixed-owner Nature Type Combo still grants +1 AP immediately to whoever completed it", () => {
+    const state = makeState({ ap: 2, currentPlayer: "A" });
+    place(state, "A", "nature", 0, 0);
+    place(state, "B", "nature", 0, 1);
+    state.players.A.hand = ["nature"];
+    const apBefore = state.ap;
+
+    playCard(state, "A", 0, 0, 2);
+
+    expect(state.ap).toBe(apBefore - 1 + 1); // -1 Play cost, +1 Nature Type Combo bonus
+  });
+});
+
+// A verified "no accidental Combo" layout for a fully-occupied 3x3 region —
+// zero lines (row/col/diagonal) share an owner OR a type across all 3 cells.
+// Verified by script, not by hand: the 2nd playtesting revision means a
+// Combo can now form from type alone, so a pattern that only varied owner
+// (Stage 6a) no longer suffices — every line's uniform card type would
+// register as a Combo on its own. Both grids vary independently.
 const SAFE_MAIN_OWNERS: readonly PlayerId[][] = [
-  ["A", "B", "A"],
-  ["A", "B", "B"],
-  ["B", "A", "A"],
+  ["A", "A", "B"],
+  ["B", "B", "A"],
+  ["A", "A", "B"],
+];
+const SAFE_MAIN_TYPES: readonly CardType[][] = [
+  ["fire", "lightning", "water"],
+  ["water", "nature", "fire"],
+  ["fire", "lightning", "water"],
 ];
 
 // Places the verified-safe pattern at the given offset (0 for a plain 3x3
@@ -372,7 +493,7 @@ function placeSafeMain(state: GameState, rowOffset: number, colOffset: number, s
   for (let r = 0; r < 3; r++) {
     for (let c = 0; c < 3; c++) {
       if (skip.some(([sr, sc]) => sr === r && sc === c)) continue;
-      place(state, SAFE_MAIN_OWNERS[r][c], "fire", r + rowOffset, c + colOffset);
+      place(state, SAFE_MAIN_OWNERS[r][c], SAFE_MAIN_TYPES[r][c], r + rowOffset, c + colOffset);
     }
   }
 }
@@ -380,13 +501,13 @@ function placeSafeMain(state: GameState, rowOffset: number, colOffset: number, s
 describe("Expansion (section 12)", () => {
   it("keeps the board at 3x3 while the Main Board is not yet full", () => {
     const state = makeState({ ap: 2, currentPlayer: "A" });
-    // 7 of 9 cells filled via the safe pattern, no combo among them; (2,1)
+    // 7 of 9 cells filled via the safe pattern, no Combo among them; (2,1)
     // and (2,2) are left empty.
     placeSafeMain(state, 0, 0, [
       [2, 1],
       [2, 2],
     ]);
-    state.players.A.hand = ["fire"];
+    state.players.A.hand = ["lightning"]; // (2,1) is owner A, type lightning in the pattern
 
     playCard(state, "A", 0, 2, 1); // fills the 8th cell (2,1); (2,2) stays empty
 
@@ -394,11 +515,11 @@ describe("Expansion (section 12)", () => {
   });
 
   it("expands to a 5x5 board the moment the Main Board becomes full, even with no combo on that Play", () => {
-    const state = makeState({ ap: 2, currentPlayer: "A" });
+    const state = makeState({ ap: 2, currentPlayer: "B" });
     placeSafeMain(state, 0, 0, [[2, 2]]); // 8 of 9, safe-pattern verified combo-free
-    state.players.A.hand = ["fire"];
+    state.players.B.hand = ["water"]; // (2,2) is owner B, type water in the pattern
 
-    playCard(state, "A", 0, 2, 2); // fills (2,2) per the pattern (owner A), completing the Main Board
+    playCard(state, "B", 0, 2, 2); // fills (2,2), completing the Main Board
 
     // A full 3x3 always expands rather than locking (Board Locked only ever
     // applies to an already-expanded 5x5 — see the "Board Locked" suite).
@@ -406,8 +527,8 @@ describe("Expansion (section 12)", () => {
     expect(state.board.length).toBe(5);
     // §12: "原来的 3x3 是 5x5 的中心区域" — the prior contents move to the
     // center untouched, offset by 1 in both directions.
-    expect(state.board[1][1]).toEqual({ owner: "A", type: "fire" });
-    expect(state.board[3][3]).toEqual({ owner: "A", type: "fire" }); // the just-played (2,2)
+    expect(state.board[1][1]).toEqual({ owner: "A", type: "fire" }); // old (0,0)
+    expect(state.board[3][3]).toEqual({ owner: "B", type: "water" }); // the just-played (2,2)
     // The new outer ring is empty.
     expect(state.board[0][0]).toBeNull();
     expect(state.board[4][4]).toBeNull();
@@ -435,54 +556,60 @@ describe("Expansion (section 12)", () => {
 
   it("keeps the Expansion when a combo clears only Expansion cells and the Main Board stays full", () => {
     const state = makeState({ ap: 2, currentPlayer: "A", board: emptyBoard(5) });
-    // Main Board (rows/cols 1-3), safe pattern, fully occupied and untouched
-    // by this Play — the triggering combo lives entirely in row 4, which has
-    // no Main Board cells at all, so it can't also disturb the Main Board's
-    // fullness (confirmed: no column or diagonal through row 4 reaches a
-    // same-owner pair in the Main pattern above it).
+    // Main Board (rows/cols 1-3), safe pattern (owner AND type both vary),
+    // fully occupied and untouched by this Play. The triggering Combo lives
+    // in row 4 at columns 2-4, verified by script to be the one placement
+    // that doesn't also clip a diagonal into the Main pattern — an earlier,
+    // more "obvious"-looking choice (columns 0-2) turned out to share an
+    // owner with two Main cells on the anti-diagonal.
     placeSafeMain(state, 1, 1);
-    place(state, "A", "water", 4, 0);
-    place(state, "A", "water", 4, 1);
+    place(state, "A", "water", 4, 2);
+    place(state, "A", "water", 4, 3);
     state.players.A.hand = ["water"];
 
-    playCard(state, "A", 0, 4, 2); // completes the row-4 Water combo
+    playCard(state, "A", 0, 4, 4); // completes the row-4 Water combo
 
     expect(state.board.length).toBe(5); // still expanded
-    expect(state.board[4][0]).toBeNull(); // the Expansion combo cleared
+    expect(state.board[4][2]).toBeNull(); // the Expansion combo cleared
     expect(state.board[1][1]).not.toBeNull(); // Main Board untouched
   });
 
   it("shrinks back to 3x3 when a combo clears a Main Board cell, discarding the rest of the Expansion ring", () => {
     const state = makeState({ ap: 2, currentPlayer: "A", board: emptyBoard(5) });
-    // Main Board (rows/cols 1-3), safe pattern, fully occupied. The pattern's
-    // (1,1) and (2,1) are both owner A, so completing (0,1) — Expansion, same
-    // owner — forms exactly one vertical Combo through those two Main cells
-    // (card type is irrelevant to Combo formation now, so no other line is
-    // at risk of forming incidentally).
+    // Main Board (rows/cols 1-3), safe pattern, fully occupied. Completing
+    // (0,1) — Expansion, owner A — forms an Owner Combo on the diagonal
+    // through two Main cells, (1,2) and (2,3) (both owner A in the pattern;
+    // mixed type, so no bonus effect). Verified by script: this pattern's
+    // rows/columns out of the ring don't offer a same-owner or same-type
+    // pair into Main, only this diagonal does.
     placeSafeMain(state, 1, 1);
     // An unrelated card sitting elsewhere in the ring — expected to simply
     // vanish once the board shrinks, per instruction: no hidden persistence.
+    // Owner A deliberately (not B): B would share an owner with two Main
+    // cells on a different diagonal reaching this exact corner, forming an
+    // unwanted second Combo — confirmed by script while building this fixture.
     place(state, "A", "lightning", 4, 4);
     state.players.A.hand = ["fire"];
 
-    playCard(state, "A", 0, 0, 1); // (0,1): Expansion, completes the vertical Combo
+    playCard(state, "A", 0, 0, 1); // (0,1): Expansion, completes the diagonal Combo
 
     expect(state.board.length).toBe(3); // Main Board no longer full -> shrunk
-    // The cleared Main cells (old (1,1), (2,1)) map to new (0,0) and (1,0).
-    expect(state.board[0][0]).toBeNull();
-    expect(state.board[1][0]).toBeNull();
-    // The untouched Main cells survive, shifted back by the same offset.
-    expect(state.board[0][1]).toEqual({ owner: "B", type: "fire" }); // old (1,2)
-    expect(state.board[2][0]).toEqual({ owner: "B", type: "fire" }); // old (3,1)
+    // The cleared Main cells (old (1,2), (2,3)) map to new (0,1) and (1,2).
+    expect(state.board[0][1]).toBeNull();
+    expect(state.board[1][2]).toBeNull();
+    // An untouched Main cell survives, shifted back by the same offset.
+    expect(state.board[0][0]).toEqual({ owner: "A", type: "fire" }); // old (1,1)
     // Only a 3x3 grid exists now — the old (4,4) card has no cell to live in.
     expect(state.board.every((row) => row.length === 3)).toBe(true);
   });
 });
 
 describe("Board Locked", () => {
-  // Verified by script (no hand-checking of a 25-cell grid): every row,
-  // column and both diagonals avoid 3 consecutive same-owner cells anywhere
-  // on this 5x5 grid, including once the last cell (4,4) is filled.
+  // Verified by script, not by hand: every row, column and both diagonals
+  // avoid 3 consecutive cells sharing an owner OR a type anywhere on this
+  // 5x5 grid, including once the last cell (4,4) is filled. Needed since the
+  // 2nd playtesting revision: a uniform card type (as Stage 6b used) would
+  // make every line a Combo on type alone, regardless of owner.
   const SAFE_5X5_OWNERS: readonly PlayerId[][] = [
     ["A", "A", "B", "B", "A"],
     ["B", "B", "A", "A", "B"],
@@ -490,18 +617,25 @@ describe("Board Locked", () => {
     ["B", "B", "A", "A", "B"],
     ["A", "A", "B", "B", "A"],
   ];
+  const SAFE_5X5_TYPES: readonly CardType[][] = [
+    ["fire", "lightning", "water", "nature", "fire"],
+    ["water", "nature", "fire", "lightning", "water"],
+    ["fire", "lightning", "water", "nature", "fire"],
+    ["water", "nature", "fire", "lightning", "water"],
+    ["fire", "lightning", "water", "nature", "fire"],
+  ];
 
   it("locks when a Play fills the last cell of a full 5x5 board, forming no combo, with no winner", () => {
     const state = makeState({ ap: 2, currentPlayer: "A", board: emptyBoard(5) });
     for (let r = 0; r < 5; r++) {
       for (let c = 0; c < 5; c++) {
         if (r === 4 && c === 4) continue; // left empty for the triggering Play
-        place(state, SAFE_5X5_OWNERS[r][c], "fire", r, c);
+        place(state, SAFE_5X5_OWNERS[r][c], SAFE_5X5_TYPES[r][c], r, c);
       }
     }
-    state.players.A.hand = ["fire"];
+    state.players.A.hand = ["fire"]; // (4,4) is owner A, type fire in the pattern
 
-    playCard(state, "A", 0, 4, 4); // (4,4) is owner A in the pattern
+    playCard(state, "A", 0, 4, 4);
 
     expect(state.status).toBe("locked");
     expect(state.winner).toBeNull();
@@ -534,7 +668,7 @@ describe("Board Locked", () => {
     for (let r = 0; r < 5; r++) {
       for (let c = 0; c < 5; c++) {
         if (r === 4 && c === 4) continue;
-        place(state, SAFE_5X5_OWNERS[r][c], "fire", r, c);
+        place(state, SAFE_5X5_OWNERS[r][c], SAFE_5X5_TYPES[r][c], r, c);
       }
     }
     state.players.A.hand = ["fire"];

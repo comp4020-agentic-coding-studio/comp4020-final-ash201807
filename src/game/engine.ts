@@ -13,7 +13,10 @@ const NORMAL_TURN_AP = 2;
 const FIRST_TURN_AP = 1;
 const PLAY_COST = 1;
 const DRAW_COST = 1;
-const COMBO_DAMAGE = 15;
+const OWNER_COMBO_DAMAGE = 15;
+// A same-type-only Combo (mixed owner) deals less than a full Owner Combo —
+// confirmed in the 2nd playtesting revision, alongside the rule itself.
+const TYPE_ONLY_COMBO_DAMAGE = 5;
 const WATER_DRAW_COUNT = 2;
 const NATURE_AP_BONUS = 1;
 
@@ -159,13 +162,16 @@ export function detectCombos(board: Cell[][]): Combo[] {
         if (values.some((v) => v === null)) continue;
         const [a, b, c] = values as PlacedCard[];
 
-        // Revised rule (post-playtesting): a Combo only requires the same
-        // owner across 3 consecutive cells in one of the directions above —
-        // card type no longer gates whether a Combo exists at all, only
-        // whether it also carries a same-type bonus effect (sameType below).
-        if (a.owner === b.owner && b.owner === c.owner) {
-          const sameType = a.type === b.type && b.type === c.type ? a.type : null;
-          combos.push({ owner: a.owner, cells, sameType });
+        // Revised rule (2nd playtesting pass): a Combo forms when 3
+        // consecutive cells share an owner, a type, or both — checked
+        // independently. Sharing only a type (different owners) still
+        // counts: it just deals less damage and is credited to whoever
+        // completed it (see applyCombos). A line satisfying neither isn't a
+        // Combo at all and is never pushed.
+        const ownerMatch = a.owner === b.owner && b.owner === c.owner;
+        const sameType = a.type === b.type && b.type === c.type ? a.type : null;
+        if (ownerMatch || sameType !== null) {
+          combos.push({ cells, ownerMatch, sameType });
         }
       }
     }
@@ -204,10 +210,19 @@ function applyCombos(state: GameState, actingPlayer: PlayerId, random: RandomSou
   if (combos.length > 0) {
     const opponent = otherPlayer(actingPlayer);
 
-    // Phase 2 + 3: every combo deals a flat 15 (the attack values in §4 are
-    // all 5, times 3 cards), all combos from this Play summed and applied at
-    // once.
-    const damage = combos.length * COMBO_DAMAGE;
+    // Phase 2 + 3: an Owner Combo deals 15 regardless of its type (the
+    // attack values in §4 are all 5, times 3 cards) — including when it's
+    // ALSO a same-type Combo, counted once, not 15+5. A same-type-only
+    // Combo (mixed owner) deals 5. Always credited to actingPlayer, who —
+    // whichever kind of Combo this is — is necessarily whoever just placed
+    // the card completing it (see detectCombos: a Combo surviving to be
+    // detected here was cleared, if it existed, on every prior Play, so it
+    // can only be newly complete because of this one). All combos from this
+    // Play summed and applied at once.
+    const damage = combos.reduce(
+      (sum, combo) => sum + (combo.ownerMatch ? OWNER_COMBO_DAMAGE : TYPE_ONLY_COMBO_DAMAGE),
+      0,
+    );
     state.players[opponent].hp -= damage;
 
     // Phase 4: a lethal HP ends the game immediately — Phases 5-7 (effects,

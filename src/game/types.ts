@@ -41,12 +41,21 @@ export interface GameState {
   restartConfirmed: Record<PlayerId, boolean>;
 }
 
+// Revised rule (2nd playtesting pass): a line of 3 is a Combo if it matches
+// on OWNER, on TYPE, or both — evaluated independently. There is no single
+// "owner" to report when only type matches (the 3 cells belong to different
+// players), so `ownerMatch` is a flag, not an identity. Whoever completed
+// this line (always the current Play's acting player — see engine.ts) deals
+// the damage and gets any effect either way; nothing here needs to record
+// that separately.
 export interface Combo {
-  owner: PlayerId;
   cells: Array<[number, number]>;
-  // Set only when all 3 cells also share a card type — that's what gates a
-  // combo's special effect (Lightning/Water/Nature). A combo always forms
-  // and deals damage on owner alone; a mixed-type combo has `sameType: null`
-  // and no effect.
+  // All 3 cells share an owner. Combined with sameType below: both ->
+  // 15 damage (counted once, not 20); owner only -> 15 damage, no effect;
+  // neither -> this line isn't a Combo at all and was never pushed.
+  ownerMatch: boolean;
+  // Set when all 3 cells also share a card type, regardless of ownerMatch —
+  // this alone gates the special effect (Lightning/Water/Nature) and, when
+  // ownerMatch is false, caps damage at 5 instead of 15.
   sameType: CardType | null;
 }
