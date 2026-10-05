@@ -26,6 +26,7 @@ interface ServerMessage {
   type: "assigned" | "waiting" | "state" | "full" | "error";
   player?: "A" | "B";
   state?: {
+    status: "active" | "finished" | "locked";
     ap: number;
     currentPlayer: "A" | "B";
     players: Record<"A" | "B", { hand: unknown[] }>;
@@ -112,6 +113,19 @@ it("enforces turn order and leaves state unchanged on a rejected action", async 
   expect(newMessages).toHaveLength(1);
   expect(newMessages[0].type).toBe("error");
   expect(newMessages[0].message).toMatch(/turn/);
+});
+
+it("rejects confirmNewGame while the game is still active", async () => {
+  const messageCountBefore = a.messages.length;
+  send(a.ws, { type: "confirmNewGame" });
+  await wait(200);
+
+  const newMessages = a.messages.slice(messageCountBefore);
+  expect(newMessages).toHaveLength(1);
+  expect(newMessages[0].type).toBe("error");
+  expect(newMessages[0].message).toMatch(/active/);
+  // Rejected, so nothing was pushed to the other client either.
+  expect(lastState(b.messages)?.status).toBe("active");
 });
 
 it("resumes the same game for a reconnecting session instead of losing it", async () => {

@@ -10,4 +10,5 @@ export type ServerMessage =
 export type ClientMessage =
   | { type: "play"; handIndex: number; row: number; col: number }
   | { type: "draw" }
-  | { type: "endTurn" };
+  | { type: "endTurn" }
+  | { type: "confirmNewGame" };

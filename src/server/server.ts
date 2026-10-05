@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { createServer as createHttpServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { WebSocketServer, type WebSocket } from "ws";
-import { createInitialState, drawCard, endTurn, playCard } from "../game/engine.ts";
+import { confirmNewGame, createInitialState, drawCard, endTurn, playCard } from "../game/engine.ts";
 import type { PlayerId } from "../game/types.ts";
 import { parseSessionId, sessionCookieHeader } from "./cookies.ts";
 import type { Persistence } from "./persistence.ts";
@@ -156,6 +156,13 @@ export function createServer(persistence: Persistence): Server {
             drawCard(appState.game, player);
           } else if (message.type === "endTurn") {
             endTurn(appState.game, player);
+          } else if (message.type === "confirmNewGame") {
+            // Unlike the other actions, confirmNewGame can return a BRAND
+            // NEW GameState (once both players have confirmed) rather than
+            // mutate appState.game in place — the reassignment here is load
+            // bearing, not cosmetic. Session identities (appState.sessions)
+            // are untouched either way.
+            appState.game = confirmNewGame(appState.game, player);
           } else {
             throw new Error("unknown message type");
           }
