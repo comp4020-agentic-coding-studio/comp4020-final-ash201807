@@ -10,13 +10,16 @@ across different owners deals only 5, credited to whoever placed the
 completing card; both at once still counts once, for 15, never 20. Only a
 same-type Combo — credited to whoever triggered it — fires that type's
 effect: Lightning steals the opponent's next-turn AP, Water refills the
-credited player's hand, Nature grants them another action now. Neither match
-means no Combo. First to 0 HP loses outright; a full board with neither
+credited player's hand, Nature grants them another action now, and Fire deals
+10 extra damage straight to the opponent (so a Type Combo's total is 15, and
+an Owner Combo that's also same-type totals 25). Neither match means no
+Combo. First to 0 HP loses outright — including when Fire's own extra damage
+is what crosses zero, not just the base hit — a full board with neither
 player dead locks instead, with no winner. Either player can also end an
 active game early if the other agrees; neither case has a winner. Any ending
 needs both players to confirm a new game before one starts — a rematch
 doesn't reset it out from under the other. The rules are fixed by a
-specification, three times revised after real two-player playtesting, agreed
+specification, four times revised after real two-player playtesting, agreed
 before this code was written; what to build on top was mine to decide.
 
 ## What good means here
@@ -60,9 +63,10 @@ process — while a session that's still connected is left alone; and
 voluntarily ending an active game, including the other player rejecting that
 request, works end-to-end over the real transport. Checked in
 `src/game/engine.test.ts`, against the rules engine directly: AP costs, every
-Combo direction and type combination, damage and effect stacking, the
-Expansion, Board Locked, voluntary termination, and restart confirmation all
-match the specification — reaching a real
+Combo direction and type combination, damage and effect stacking (including
+Fire's own extra-damage effect, and its own lethal check separate from the
+base damage's), the Expansion, Board Locked, voluntary termination, and
+restart confirmation all match the specification — reaching a real
 finished/locked game, or controlling which cards complete a Combo, isn't
 practical live, so these are checked where that control exists.
 

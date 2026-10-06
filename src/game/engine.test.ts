@@ -208,10 +208,14 @@ describe("combo detection", () => {
 
 describe("combo resolution (section 11 phases)", () => {
   it("applies 15 damage to the opponent for a single combo", () => {
+    // lightning, not fire (Stage 8c): this test is about the generic Owner
+    // Combo damage formula, not about any one type's own effect — lightning's
+    // effect (a future-turn AP reduction) doesn't touch hp/hand, so it can't
+    // quietly change the number this test is actually checking.
     const state = makeState({ ap: 2, currentPlayer: "A" });
-    place(state, "A", "fire", 0, 0);
-    place(state, "A", "fire", 0, 1);
-    state.players.A.hand = ["fire"];
+    place(state, "A", "lightning", 0, 0);
+    place(state, "A", "lightning", 0, 1);
+    state.players.A.hand = ["lightning"];
 
     playCard(state, "A", 0, 0, 2);
 
@@ -239,12 +243,16 @@ describe("combo resolution (section 11 phases)", () => {
   });
 
   it("sums damage from multiple simultaneous combos before applying it", () => {
+    // lightning, not fire (Stage 8c) — see "applies 15 damage..." above for
+    // why. The equivalent all-Fire cross shape is covered separately under
+    // "Fire effect (Stage 8c)" below, where the extra +10-per-combo IS the
+    // point.
     const state = makeState({ ap: 2, currentPlayer: "A" });
-    place(state, "A", "fire", 0, 0);
-    place(state, "A", "fire", 0, 1);
-    place(state, "A", "fire", 1, 1);
-    place(state, "A", "fire", 2, 1);
-    state.players.A.hand = ["fire"];
+    place(state, "A", "lightning", 0, 0);
+    place(state, "A", "lightning", 0, 1);
+    place(state, "A", "lightning", 1, 1);
+    place(state, "A", "lightning", 2, 1);
+    state.players.A.hand = ["lightning"];
 
     playCard(state, "A", 0, 0, 2);
 
@@ -335,19 +343,22 @@ describe("combo resolution (section 11 phases)", () => {
   });
 
   it("ends the game immediately on lethal HP and skips effects, clear, and update (section 11 phase 4)", () => {
+    // lightning, not fire (Stage 8c) — this test is about the base-damage
+    // lethal check (Phase 4), not about Fire's own extra lethal check
+    // (Phase 5), which has its own dedicated tests below.
     const state = makeState({ ap: 2, currentPlayer: "A" });
     state.players.B.hp = 20;
-    place(state, "A", "fire", 0, 0);
-    place(state, "A", "fire", 0, 1);
-    state.players.A.hand = ["fire"];
+    place(state, "A", "lightning", 0, 0);
+    place(state, "A", "lightning", 0, 1);
+    state.players.A.hand = ["lightning"];
 
     playCard(state, "A", 0, 0, 2);
     expect(state.status).toBe("active");
     expect(state.players.B.hp).toBe(5);
 
-    place(state, "A", "fire", 1, 0);
-    place(state, "A", "fire", 1, 1);
-    state.players.A.hand = ["fire"];
+    place(state, "A", "lightning", 1, 0);
+    place(state, "A", "lightning", 1, 1);
+    state.players.A.hand = ["lightning"];
 
     playCard(state, "A", 0, 1, 2);
     expect(state.status).toBe("finished");
@@ -379,9 +390,9 @@ describe("combo resolution (section 11 phases)", () => {
   it("rejects further actions once the game has finished", () => {
     const state = makeState({ ap: 2, currentPlayer: "A" });
     state.players.B.hp = 10;
-    place(state, "A", "fire", 0, 0);
-    place(state, "A", "fire", 0, 1);
-    state.players.A.hand = ["fire"];
+    place(state, "A", "lightning", 0, 0);
+    place(state, "A", "lightning", 0, 1);
+    state.players.A.hand = ["lightning"];
 
     playCard(state, "A", 0, 0, 2);
     expect(state.status).toBe("finished");
@@ -391,12 +402,15 @@ describe("combo resolution (section 11 phases)", () => {
 
 describe("mixed-owner Type Combo (2nd playtesting revision)", () => {
   it("deals only 5 damage for a mixed-owner Type Combo, credited to whoever completed it", () => {
+    // lightning, not fire (Stage 8c) — this is the generic Type Combo damage
+    // formula, not a Fire-specific test; Fire's own Type Combo total (5 base
+    // + 10 effect = 15) has its own dedicated test below.
     const state = makeState({ ap: 2, currentPlayer: "A" });
-    place(state, "A", "fire", 0, 0);
-    place(state, "B", "fire", 0, 1);
-    state.players.A.hand = ["fire"];
+    place(state, "A", "lightning", 0, 0);
+    place(state, "B", "lightning", 0, 1);
+    state.players.A.hand = ["lightning"];
 
-    playCard(state, "A", 0, 0, 2); // A completes A-fire/B-fire/A-fire
+    playCard(state, "A", 0, 0, 2); // A completes A-lightning/B-lightning/A-lightning
 
     expect(state.players.B.hp).toBe(95); // 100 - 5, not the 15 an Owner Combo deals
     expect(state.players.A.hp).toBe(100); // the trigger player takes no damage
@@ -404,11 +418,11 @@ describe("mixed-owner Type Combo (2nd playtesting revision)", () => {
 
   it("credits the Type Combo to whichever player actually completes it", () => {
     const state = makeState({ ap: 2, currentPlayer: "B" });
-    place(state, "A", "fire", 0, 0);
-    place(state, "B", "fire", 0, 1);
-    state.players.B.hand = ["fire"];
+    place(state, "A", "lightning", 0, 0);
+    place(state, "B", "lightning", 0, 1);
+    state.players.B.hand = ["lightning"];
 
-    playCard(state, "B", 0, 0, 2); // B completes A-fire/B-fire/B-fire this time
+    playCard(state, "B", 0, 0, 2); // B completes A-lightning/B-lightning/B-lightning this time
 
     expect(state.players.A.hp).toBe(95); // B dealt the damage, to A, this time
     expect(state.players.B.hp).toBe(100);
@@ -432,6 +446,12 @@ describe("mixed-owner Type Combo (2nd playtesting revision)", () => {
   });
 
   it("ends the game immediately when a mixed-owner Type Combo's damage is lethal", () => {
+    // Deliberately still fire, post-Stage-8c: exactly lethal from the BASE
+    // 5 damage alone (Phase 2+3, before Fire's own Phase 5 bonus ever runs),
+    // so this keeps proving the base-damage lethal check works for a Fire
+    // combo specifically without Fire's +10 getting a chance to apply at
+    // all — see "Fire effect (Stage 8c)" below for the case where Fire's
+    // bonus is what actually delivers the kill.
     const state = makeState({ ap: 2, currentPlayer: "A" });
     state.players.B.hp = 5; // exactly lethal from one Type Combo's 5 damage
     place(state, "A", "fire", 0, 0);
@@ -476,6 +496,79 @@ describe("mixed-owner Type Combo (2nd playtesting revision)", () => {
     playCard(state, "A", 0, 0, 2);
 
     expect(state.ap).toBe(apBefore - 1 + 1); // -1 Play cost, +1 Nature Type Combo bonus
+  });
+});
+
+describe("Fire effect (Stage 8c)", () => {
+  it("a mixed-owner Fire Type Combo deals 15 total: 5 base + the 10 Fire effect", () => {
+    const state = makeState({ ap: 2, currentPlayer: "A" });
+    place(state, "A", "fire", 0, 0);
+    place(state, "B", "fire", 0, 1);
+    state.players.A.hand = ["fire"];
+
+    playCard(state, "A", 0, 0, 2);
+
+    expect(state.players.B.hp).toBe(85); // 100 - (5 base + 10 effect)
+  });
+
+  it("an Owner Combo that's also same-type Fire deals 25 total: 15 base + the 10 Fire effect", () => {
+    const state = makeState({ ap: 2, currentPlayer: "A" });
+    place(state, "A", "fire", 0, 0);
+    place(state, "A", "fire", 0, 1);
+    state.players.A.hand = ["fire"];
+
+    playCard(state, "A", 0, 0, 2);
+
+    expect(state.players.B.hp).toBe(75); // 100 - (15 base + 10 effect)
+  });
+
+  it("stacks two simultaneous Owner+Fire combos into 50 total damage (2 x 25)", () => {
+    // Same cross shape as the generic "sums damage..." test above, but all
+    // Fire — confirmed stacking, same precedent as Lightning/Nature: two
+    // independent same-type combos trigger the effect twice, not once.
+    const state = makeState({ ap: 2, currentPlayer: "A" });
+    place(state, "A", "fire", 0, 0);
+    place(state, "A", "fire", 0, 1);
+    place(state, "A", "fire", 1, 1);
+    place(state, "A", "fire", 2, 1);
+    state.players.A.hand = ["fire"];
+
+    playCard(state, "A", 0, 0, 2);
+
+    expect(state.players.B.hp).toBe(50); // 100 - 2*(15 base + 10 effect)
+  });
+
+  it("skips the Fire effect itself when the base combo alone is already lethal", () => {
+    const state = makeState({ ap: 2, currentPlayer: "A" });
+    state.players.B.hp = 15; // exactly lethal from one Owner+Fire combo's 15 base damage
+    place(state, "A", "fire", 0, 0);
+    place(state, "A", "fire", 0, 1);
+    state.players.A.hand = ["fire"];
+
+    playCard(state, "A", 0, 0, 2);
+
+    expect(state.status).toBe("finished");
+    expect(state.winner).toBe("A");
+    // If the Fire effect had wrongly run anyway, this would be -10, not 0.
+    expect(state.players.B.hp).toBe(0);
+    // Phase 6 (clear) never ran either, same as any other Phase-4-style finish.
+    expect(state.board[0][0]).not.toBeNull();
+    expect(state.board[0][1]).not.toBeNull();
+    expect(state.board[0][2]).not.toBeNull();
+  });
+
+  it("the Fire effect's own bonus damage can deliver the kill when the base combo alone isn't lethal", () => {
+    const state = makeState({ ap: 2, currentPlayer: "A" });
+    state.players.B.hp = 20; // survives the 15 base damage (to 5), not the +10 Fire effect after it
+    place(state, "A", "fire", 0, 0);
+    place(state, "A", "fire", 0, 1);
+    state.players.A.hand = ["fire"];
+
+    playCard(state, "A", 0, 0, 2);
+
+    expect(state.status).toBe("finished");
+    expect(state.winner).toBe("A");
+    expect(state.players.B.hp).toBe(-5); // 20 - 15 (base, not yet lethal) - 10 (Fire effect)
   });
 });
 

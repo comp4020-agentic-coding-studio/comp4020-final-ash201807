@@ -19,6 +19,14 @@ const OWNER_COMBO_DAMAGE = 15;
 const TYPE_ONLY_COMBO_DAMAGE = 5;
 const WATER_DRAW_COUNT = 2;
 const NATURE_AP_BONUS = 1;
+// Fire redesign (Stage 8c): v1.0 gave Fire no effect at all, unlike the
+// other three types (README's own effect list used to only name three).
+// This is extra damage on top of whatever base damage the combo already
+// dealt, to the same opponent — a Type Combo totals 5+10=15, an Owner Combo
+// that's also same-type totals 15+10=25. Lives in the same Phase 5 loop as
+// the other three effects below, so it's skipped on an already-lethal Play
+// exactly like they are (Phase 4 returns before Phase 5 ever runs).
+const FIRE_EFFECT_DAMAGE = 10;
 
 // Each line direction scanned once from every cell, so a run of 3 is found
 // exactly once and a run of 4+ is found as its overlapping 3-windows — the
@@ -203,7 +211,9 @@ function unionCells(combos: Combo[]): Array<[number, number]> {
 // and the Main Board can become full, or stop being full, without a combo
 // (e.g. the Play that fills its very last empty cell). Only phases 2-6
 // (damage, win check, effects, clearing) are conditional on combos existing;
-// a lethal Play (phase 4) still skips 5-7 entirely, combo count aside.
+// a lethal Play skips whatever's left entirely, combo count aside — whether
+// the kill lands in Phase 4 (base damage) or, since the Fire redesign
+// (Stage 8c), partway through Phase 5 (Fire's own bonus damage).
 function applyCombos(state: GameState, actingPlayer: PlayerId, random: RandomSource): Combo[] {
   const combos = detectCombos(state.board); // Phase 1
 
@@ -247,6 +257,20 @@ function applyCombos(state: GameState, actingPlayer: PlayerId, random: RandomSou
         }
       } else if (combo.sameType === "nature") {
         state.ap += NATURE_AP_BONUS;
+      } else if (combo.sameType === "fire") {
+        // Fire is the first Phase 5 effect that can itself deal damage, so —
+        // unlike the other three, which can never turn a non-lethal Play
+        // lethal — it needs its own lethal check, same as Phase 4's: "first
+        // to 0 HP loses outright" (README) has to hold the moment it's
+        // crossed, not just right after the base damage in Phase 2+3. Any
+        // later combos in this same Play (and Phases 6-7) are skipped, same
+        // as an ordinary Phase 4 finish.
+        state.players[opponent].hp -= FIRE_EFFECT_DAMAGE;
+        if (state.players[opponent].hp <= 0) {
+          state.status = "finished";
+          state.winner = actingPlayer;
+          return combos;
+        }
       }
     }
 
