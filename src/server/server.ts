@@ -7,10 +7,19 @@ import type { PlayerId } from "../game/types.ts";
 import { parseSessionId, sessionCookieHeader } from "./cookies.ts";
 import type { Persistence } from "./persistence.ts";
 import type { ClientMessage, ServerMessage } from "./protocol.ts";
-import { joinSession } from "./sessions.ts";
+import { joinSession, markDisconnected, normalizeSessions, reapExpiredSessions } from "./sessions.ts";
 
 function newSessionId(): string {
   return randomBytes(16).toString("hex");
+}
+
+export interface ServerOptions {
+  // How long a disconnected session keeps its player slot before it's freed
+  // for someone else — long enough that an ordinary page reload (close then
+  // immediately reopen with the same cookie) never loses the seat. Injectable
+  // so spec/ can run this in milliseconds instead of really waiting; defaults
+  // to the real 30s grace period otherwise.
+  disconnectGraceMs?: number;
 }
 
 // spec/invariants.test.ts only checks that each README heading appears, in
@@ -38,8 +47,13 @@ function renderReadme(): string {
   ].join("\n");
 }
 
-export function createServer(persistence: Persistence): Server {
+export function createServer(persistence: Persistence, options: ServerOptions = {}): Server {
+  const disconnectGraceMs = options.disconnectGraceMs ?? 30_000;
   const appState = persistence.load();
+  // Pre-Stage-8a rows store a bare PlayerId per session; upgrade them once,
+  // here, before anything else reads appState.sessions (see
+  // normalizeSessions' own comment for why guessing wrong here is dangerous).
+  appState.sessions = normalizeSessions(appState.sessions);
   const sockets = new Map<WebSocket, PlayerId>();
 
   function send(ws: WebSocket, message: ServerMessage): void {
@@ -69,17 +83,44 @@ export function createServer(persistence: Persistence): Server {
   // A third-or-later distinct session gets `player: null` (no slot, no
   // state access) rather than a read-only spectator seat, per instruction.
   // Only called from the WebSocket upgrade handler (see above).
-  function joinAndResolveSession(req: IncomingMessage): { player: PlayerId | null; justCompletedPair: boolean } {
+  //
+  // Every call first reaps any session whose disconnect grace period has
+  // fully elapsed — a plain wall-clock comparison against a persisted
+  // timestamp, not a running timer, so it gives the right answer even if the
+  // server process was stopped (Fly auto-stops the machine while nobody's
+  // connected) for the entire grace period and only just woke back up for
+  // this request. If that reaping empties the session map, nobody is left to
+  // have a game with, so the old game goes with it — the next pair to form
+  // starts createInitialState() fresh via the same justCompletedPair path
+  // below, same as the very first pairing ever. Reap, any resulting game
+  // clear, and this request's own join are one persistence.save(), not two:
+  // a half-applied write (sessions cleared but the old game left behind, or
+  // the reverse) is exactly the inconsistency that needed a manual database
+  // fix once already (see the "game is full" incident referenced in chat).
+  function joinAndResolveSession(req: IncomingMessage): {
+    player: PlayerId | null;
+    justCompletedPair: boolean;
+    sessionId: string;
+  } {
+    appState.sessions = reapExpiredSessions(appState.sessions, Date.now(), disconnectGraceMs);
+    if (Object.keys(appState.sessions).length === 0) {
+      appState.game = null;
+    }
+
     const sessionId = parseSessionId(req.headers.cookie) ?? newSessionId();
 
     const result = joinSession(appState.sessions, sessionId);
-    if (result.kind === "full") return { player: null, justCompletedPair: false };
+    // Reaching "full" means reaping just above dropped nothing: the moment it
+    // drops even one entry, sessions.length falls below 2 and this visitor
+    // gets assigned that freed slot instead of being rejected. So there is
+    // nothing new to persist on this path — same as before Stage 8a.
+    if (result.kind === "full") return { player: null, justCompletedPair: false, sessionId };
 
     appState.sessions = result.sessions;
     if (result.justCompletedPair) appState.game = createInitialState();
     persistence.save(appState);
 
-    return { player: result.player, justCompletedPair: result.justCompletedPair };
+    return { player: result.player, justCompletedPair: result.justCompletedPair, sessionId };
   }
 
   const httpServer = createHttpServer((req, res) => {
@@ -116,7 +157,7 @@ export function createServer(persistence: Persistence): Server {
       return;
     }
     wss.handleUpgrade(req, socket, head, (ws) => {
-      const { player, justCompletedPair } = joinAndResolveSession(req);
+      const { player, justCompletedPair, sessionId } = joinAndResolveSession(req);
 
       if (player === null) {
         send(ws, { type: "full" });
@@ -177,6 +218,18 @@ export function createServer(persistence: Persistence): Server {
 
       ws.on("close", () => {
         sockets.delete(ws);
+        // Starts this session's grace period rather than freeing its slot
+        // outright — an ordinary page reload is also a close, and must not
+        // hand the seat to whoever else happens to be connecting at that
+        // exact moment. Persisted immediately: the process may be stopped
+        // (Fly auto-stops on no connections) for the entire grace period, so
+        // this timestamp, not a live timer, is what the next request checks.
+        // NOTE: if the same session has more than one socket open at once
+        // (e.g. two tabs), closing either one marks the whole session
+        // disconnected even though the other tab is still live — a known gap
+        // multi-tab usage was never in scope for this app (README point 4).
+        appState.sessions = markDisconnected(appState.sessions, sessionId, Date.now());
+        persistence.save(appState);
       });
     });
   });

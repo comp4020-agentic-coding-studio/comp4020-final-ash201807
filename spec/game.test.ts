@@ -19,6 +19,15 @@ import WebSocket from "ws";
 // between runs. CI is unaffected: it always starts a fresh container with a
 // throwaway /data. Never point APP_URL at the deployed production app for
 // this file — it would occupy the one live game's two seats.
+//
+// The disconnect-expiry tests near the end of this file actually wait out
+// the server's configured DISCONNECT_GRACE_MS (src/server/index.ts) — this
+// file reads the same env var so it knows how long to wait, defaulting to
+// the real 30s if unset. CI sets it to 1s (.github/workflows/checks.yml).
+// Running locally against the real default makes this file take 60+ extra
+// seconds; start your dev server with DISCONNECT_GRACE_MS=1000 (and export it
+// before `pnpm check` too) for a fast local run.
+const disconnectGraceMs = Number(process.env.DISCONNECT_GRACE_MS ?? 30_000);
 const baseUrl = inject("baseUrl");
 const wsUrl = baseUrl.replace(/^http/, "ws") + "/ws";
 
@@ -146,6 +155,64 @@ it("resumes the same game for a reconnecting session instead of losing it", asyn
   expect(resumedState?.currentPlayer).toBe(beforeReconnect.currentPlayer);
   expect(resumedState?.players.A.hand.length).toBe(beforeReconnect.players.A.hand.length);
 
+  // Leave A closed (no further reconnect) and B still connected — the next
+  // test relies on exactly this to check that only A's slot gets reaped.
   aAgain.ws.close();
-  b.ws.close();
+  a = aAgain;
 });
+
+it("frees only the disconnected player's slot once its grace period elapses, leaving the still-connected opponent's session untouched", async () => {
+  // Default vitest per-test timeout (5s) isn't enough once this actually
+  // waits out a real DISCONNECT_GRACE_MS — see the timeout arg below.
+  // A has been closed (previous test) with no reconnect since; B never
+  // disconnected at all. Waiting out the grace period relies purely on
+  // wall-clock time having passed — there's no timer running anywhere for
+  // this test to depend on (Stage 8a is deliberately timer-free).
+  await wait(disconnectGraceMs + 500);
+
+  const messageCountBeforeB = b.messages.length;
+  const c = await connect(await newSessionCookie());
+  await wait(200);
+
+  // The third visitor claims A's now-freed slot rather than being rejected.
+  expect(c.messages[0]).toEqual({ type: "assigned", player: "A" });
+
+  // Freeing exactly one slot and refilling it still takes the session map
+  // from 1 entry back to 2, which is indistinguishable from the very first
+  // pairing ever completing — so it replaces the WHOLE game via the same
+  // justCompletedPair path, not just the departed player's seat. B, who
+  // never left, gets pushed this fresh state too even though B did nothing.
+  const newMessagesForB = b.messages.slice(messageCountBeforeB);
+  expect(newMessagesForB.some((m) => m.type === "state")).toBe(true);
+  const freshState = lastState(b.messages);
+  expect(freshState?.status).toBe("active");
+  expect(freshState?.players.A.hand.length).toBe(3);
+  expect(freshState?.players.B.hand.length).toBe(3);
+
+  c.ws.close();
+  b.ws.close();
+}, disconnectGraceMs + 5000);
+
+it("frees both slots once nobody reconnects within the grace period, starting a genuinely fresh pairing", async () => {
+  // Both c (as A) and b (as B) were closed at the end of the previous test
+  // with no reconnect since.
+  await wait(disconnectGraceMs + 500);
+
+  const freshA = await connect(await newSessionCookie());
+  await wait(100);
+  expect(freshA.messages[0]).toEqual({ type: "assigned", player: "A" });
+  expect(freshA.messages[1]).toEqual({ type: "waiting" });
+
+  const freshB = await connect(await newSessionCookie());
+  await wait(200);
+  expect(freshB.messages[0]).toEqual({ type: "assigned", player: "B" });
+
+  const state = lastState(freshB.messages);
+  expect(state).toBeDefined();
+  expect(state?.status).toBe("active");
+  expect(state?.players.A.hand.length).toBe(3);
+  expect(state?.players.B.hand.length).toBe(3);
+
+  freshA.ws.close();
+  freshB.ws.close();
+}, disconnectGraceMs + 5000);

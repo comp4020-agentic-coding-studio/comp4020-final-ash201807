@@ -35,7 +35,10 @@ jobs:
         # volume; the spec runs against it
         run: |
           docker build -t app .
-          docker run -d --init --name app -p 8080:8080 -e PORT=8080 --tmpfs /data app
+          # 1s instead of the real 30s default (src/server/index.ts) so
+          # spec/game.test.ts's disconnect-expiry checks don't burn CI time
+          # actually waiting out the production grace period.
+          docker run -d --init --name app -p 8080:8080 -e PORT=8080 -e DISCONNECT_GRACE_MS=1000 --tmpfs /data app
       - name: Run the spec
         run: pnpm check
         env:
