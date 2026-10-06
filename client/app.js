@@ -91,8 +91,12 @@ function render(state) {
     `You are Player ${myPlayer} | HP you:${me.hp} opp:${opponent.hp} | ` +
     `AP:${state.ap} | ${turnInfo} | status:${state.status}`;
   if (state.winner) text += ` | winner:${state.winner}`;
+  if (state.status !== "active") {
+    text += ` | New Game confirmed — you:${state.restartConfirmed[myPlayer]} opponent:${state.restartConfirmed[opponentId]}`;
+  }
   statusEl.textContent = text;
 }
 
 document.getElementById("draw-btn").addEventListener("click", () => send({ type: "draw" }));
 document.getElementById("endturn-btn").addEventListener("click", () => send({ type: "endTurn" }));
+document.getElementById("newgame-btn").addEventListener("click", () => send({ type: "confirmNewGame" }));
