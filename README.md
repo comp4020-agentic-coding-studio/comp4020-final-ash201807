@@ -12,11 +12,12 @@ same-type Combo — credited to whoever triggered it — fires that type's
 effect: Lightning steals the opponent's next-turn AP, Water refills the
 credited player's hand, Nature grants them another action now. Neither match
 means no Combo. First to 0 HP loses outright; a full board with neither
-player dead locks instead, with no winner. Either ending needs both players
-to confirm a new game before one starts — a rematch doesn't reset it out
-from under the other. The rules are fixed by a specification, twice revised
-after real two-player playtesting, agreed before this code was written; what
-to build on top was mine to decide.
+player dead locks instead, with no winner. Either player can also end an
+active game early if the other agrees; neither case has a winner. Any ending
+needs both players to confirm a new game before one starts — a rematch
+doesn't reset it out from under the other. The rules are fixed by a
+specification, three times revised after real two-player playtesting, agreed
+before this code was written; what to build on top was mine to decide.
 
 ## What good means here
 
@@ -52,12 +53,18 @@ Given that, good means:
 Checked in `spec/`, against the real running app: a third visitor is told the
 game is full; an out-of-turn action, and confirming a new game mid-match, are
 rejected and change nothing; reconnecting with the same session resumes the
-game rather than losing it. Checked in `src/game/engine.test.ts`, against the
-rules engine directly: AP costs, every Combo direction and type combination,
-damage and effect stacking, the Expansion, Board Locked, and restart
-confirmation all match the specification — reaching a real finished/locked
-game, or controlling which cards complete a Combo, isn't practical live, so
-these are checked where that control exists.
+game rather than losing it; a session that disconnects and never comes back
+has its slot freed once its grace period elapses — surviving an actual
+process restart mid-grace-period, not just elapsed time in one long-lived
+process — while a session that's still connected is left alone; and
+voluntarily ending an active game, including the other player rejecting that
+request, works end-to-end over the real transport. Checked in
+`src/game/engine.test.ts`, against the rules engine directly: AP costs, every
+Combo direction and type combination, damage and effect stacking, the
+Expansion, Board Locked, voluntary termination, and restart confirmation all
+match the specification — reaching a real
+finished/locked game, or controlling which cards complete a Combo, isn't
+practical live, so these are checked where that control exists.
 
 Judged, not checked: whether the board is genuinely legible at a glance
 (point 3) — the debug client renders state correctly but doesn't try to look

@@ -22,7 +22,11 @@ export interface PlayerState {
 // expands instead, see updateBoard) has no empty cell left, so no further
 // Play is possible, but neither player reached 0 HP. No winner is recorded
 // (confirmed): this is a draw-like terminal state, not a win.
-export type GameStatus = "active" | "finished" | "locked";
+// "abandoned" (Stage 8b): both players voluntarily agreed to end an active
+// game early, via requestQuit — distinct from "locked" so a client can tell
+// "the board filled up" apart from "we agreed to stop," even though both are
+// equally winner-less terminal states as far as the engine is concerned.
+export type GameStatus = "active" | "finished" | "locked" | "abandoned";
 
 export interface GameState {
   status: GameStatus;
@@ -39,6 +43,13 @@ export interface GameState {
   // status is "finished" or "locked". Both must be true before a fresh game
   // replaces this one — one player confirming alone must not reset it.
   restartConfirmed: Record<PlayerId, boolean>;
+  // Voluntary termination (Stage 8b): only meaningful while status is
+  // "active" — mirrors restartConfirmed's "both must agree" shape, but for
+  // ending a still-active game early rather than starting a new one after it
+  // ended. Both true moves status straight to "abandoned". Either player
+  // rejecting (see engine.ts's rejectQuit) clears both back to false rather
+  // than leaving the other player's flag standing.
+  quitRequested: Record<PlayerId, boolean>;
 }
 
 // Revised rule (2nd playtesting pass): a line of 3 is a Combo if it matches

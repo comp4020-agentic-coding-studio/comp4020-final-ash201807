@@ -1,5 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { confirmNewGame, createInitialState, detectCombos, drawCard, endTurn, playCard } from "./engine.ts";
+import {
+  confirmNewGame,
+  createInitialState,
+  detectCombos,
+  drawCard,
+  endTurn,
+  playCard,
+  rejectQuit,
+  requestQuit,
+} from "./engine.ts";
 import type { RandomSource } from "./rng.ts";
 import type { CardType, Cell, GameState, PlayerId } from "./types.ts";
 
@@ -30,6 +39,7 @@ function makeState(overrides: Partial<GameState> = {}): GameState {
     pendingLightning: { A: 0, B: 0 },
     winner: null,
     restartConfirmed: { A: false, B: false },
+    quitRequested: { A: false, B: false },
     ...overrides,
   };
 }
@@ -720,5 +730,84 @@ describe("New Game / restart confirmation", () => {
     // The usual first-turn exception still applies to the fresh game.
     expect(result.firstPlayer).toBe("A");
     expect(result.ap).toBe(1);
+  });
+});
+
+describe("Voluntary termination (Stage 8b)", () => {
+  it("records one player's request without ending the game", () => {
+    const state = makeState({ status: "active" });
+    const result = requestQuit(state, "A");
+
+    expect(result).toBe(state); // mutated in place, same object either way
+    expect(result.quitRequested).toEqual({ A: true, B: false });
+    expect(result.status).toBe("active");
+  });
+
+  it("ends the game with no winner once both players have requested it", () => {
+    const state = makeState({ status: "active", currentPlayer: "A" });
+
+    requestQuit(state, "B"); // out of turn — quitting isn't gated on whose turn it is
+    const result = requestQuit(state, "A");
+
+    expect(result.status).toBe("abandoned");
+    expect(result.winner).toBeNull();
+  });
+
+  it("rejects requestQuit and rejectQuit once the game is no longer active", () => {
+    const finished = makeState({ status: "finished", winner: "A" });
+    expect(() => requestQuit(finished, "B")).toThrow(/active/);
+    expect(() => rejectQuit(finished, "B")).toThrow(/active/);
+  });
+
+  it("clears both flags when the other player rejects a pending request", () => {
+    const state = makeState({ status: "active" });
+    requestQuit(state, "A");
+
+    const result = rejectQuit(state, "B");
+
+    expect(result.quitRequested).toEqual({ A: false, B: false });
+    expect(result.status).toBe("active");
+  });
+
+  it("is a harmless no-op when rejecting with nothing pending", () => {
+    const state = makeState({ status: "active" });
+    const result = rejectQuit(state, "A");
+
+    expect(result.quitRequested).toEqual({ A: false, B: false });
+    expect(result.status).toBe("active");
+  });
+
+  it("lets a request be withdrawn by rejecting your own pending request, not just the other player's", () => {
+    const state = makeState({ status: "active" });
+    requestQuit(state, "A");
+
+    const result = rejectQuit(state, "A");
+
+    expect(result.quitRequested).toEqual({ A: false, B: false });
+  });
+
+  it("does not let the normal game actions run once abandoned, same as any other terminal status", () => {
+    const state = makeState({ status: "active" });
+    requestQuit(state, "A");
+    requestQuit(state, "B");
+    expect(state.status).toBe("abandoned");
+
+    state.players.A.hand = ["fire"];
+    expect(() => playCard(state, state.currentPlayer, 0, 0, 0)).toThrow(/finished/);
+    expect(() => drawCard(state, state.currentPlayer)).toThrow(/finished/);
+    expect(() => endTurn(state, state.currentPlayer)).toThrow(/finished/);
+  });
+
+  it("can start a fresh game afterward through the normal New Game flow", () => {
+    const state = makeState({ status: "active" });
+    requestQuit(state, "A");
+    requestQuit(state, "B");
+    expect(state.status).toBe("abandoned");
+
+    confirmNewGame(state, "A");
+    const result = confirmNewGame(state, "B", queueRandom([0.1, 0, 0, 0, 0, 0, 0]));
+
+    expect(result.status).toBe("active");
+    expect(result.quitRequested).toEqual({ A: false, B: false });
   });
 });

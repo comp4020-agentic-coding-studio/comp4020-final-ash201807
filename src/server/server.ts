@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { createServer as createHttpServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { WebSocketServer, type WebSocket } from "ws";
-import { confirmNewGame, createInitialState, drawCard, endTurn, playCard } from "../game/engine.ts";
+import { confirmNewGame, createInitialState, drawCard, endTurn, playCard, rejectQuit, requestQuit } from "../game/engine.ts";
 import type { PlayerId } from "../game/types.ts";
 import { parseSessionId, sessionCookieHeader } from "./cookies.ts";
 import type { Persistence } from "./persistence.ts";
@@ -204,6 +204,10 @@ export function createServer(persistence: Persistence, options: ServerOptions = 
             // bearing, not cosmetic. Session identities (appState.sessions)
             // are untouched either way.
             appState.game = confirmNewGame(appState.game, player);
+          } else if (message.type === "requestQuit") {
+            requestQuit(appState.game, player);
+          } else if (message.type === "rejectQuit") {
+            rejectQuit(appState.game, player);
           } else {
             throw new Error("unknown message type");
           }

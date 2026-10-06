@@ -286,6 +286,7 @@ export function createInitialState(random: RandomSource = Math.random): GameStat
     pendingLightning: { A: 0, B: 0 },
     winner: null,
     restartConfirmed: { A: false, B: false },
+    quitRequested: { A: false, B: false },
   };
 
   beginTurn(state);
@@ -366,5 +367,37 @@ export function confirmNewGame(
   if (state.restartConfirmed.A && state.restartConfirmed.B) {
     return createInitialState(random);
   }
+  return state;
+}
+
+// Voluntary termination (Stage 8b). Mirrors confirmNewGame's "both must
+// agree" shape, but runs the opposite way round: only callable WHILE the
+// game is active (ending an active game early), not after it's already
+// over. No turn-order check — either player can propose or reject ending
+// early regardless of whose turn it is. Mutates in place and returns the
+// same state either way: unlike confirmNewGame, reaching agreement never
+// needs a new object, just a status flip.
+export function requestQuit(state: GameState, playerId: PlayerId): GameState {
+  if (state.status !== "active") throw new Error("no active game to end early");
+
+  state.quitRequested[playerId] = true;
+  if (state.quitRequested.A && state.quitRequested.B) {
+    state.status = "abandoned";
+    state.winner = null;
+  }
+  return state;
+}
+
+// Cancels whatever quit request is pending, for either player — not just the
+// one who didn't propose it. Clears BOTH flags rather than only the caller's
+// own, since a half-cleared pair (one true, one false) would leave the
+// other player's confirmation silently still standing. A no-op (not an
+// error) when nothing was pending, same tolerance confirmNewGame doesn't
+// have — there's no harmful state to protect against here, unlike resetting
+// an active game.
+export function rejectQuit(state: GameState, playerId: PlayerId): GameState {
+  if (state.status !== "active") throw new Error("no active game to end early");
+
+  state.quitRequested = { A: false, B: false };
   return state;
 }

@@ -11,4 +11,6 @@ export type ClientMessage =
   | { type: "play"; handIndex: number; row: number; col: number }
   | { type: "draw" }
   | { type: "endTurn" }
-  | { type: "confirmNewGame" };
+  | { type: "confirmNewGame" }
+  | { type: "requestQuit" }
+  | { type: "rejectQuit" };

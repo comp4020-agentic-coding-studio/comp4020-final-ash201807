@@ -35,10 +35,11 @@ interface ServerMessage {
   type: "assigned" | "waiting" | "state" | "full" | "error";
   player?: "A" | "B";
   state?: {
-    status: "active" | "finished" | "locked";
+    status: "active" | "finished" | "locked" | "abandoned";
     ap: number;
     currentPlayer: "A" | "B";
     players: Record<"A" | "B", { hand: unknown[] }>;
+    quitRequested: Record<"A" | "B", boolean>;
   };
   message?: string;
 }
@@ -213,6 +214,69 @@ it("frees both slots once nobody reconnects within the grace period, starting a 
   expect(state?.players.A.hand.length).toBe(3);
   expect(state?.players.B.hand.length).toBe(3);
 
-  freshA.ws.close();
-  freshB.ws.close();
+  // Left open on purpose — the voluntary-termination tests below continue
+  // using this exact pairing instead of closing it.
+  a = freshA;
+  b = freshB;
 }, disconnectGraceMs + 5000);
+
+it("lets one player propose ending the game early without ending it", async () => {
+  const messageCountBeforeA = a.messages.length;
+  const messageCountBeforeB = b.messages.length;
+
+  send(a.ws, { type: "requestQuit" });
+  await wait(200);
+
+  // A's own request is just one player's flag — not enough to end anything.
+  const newMessagesForA = a.messages.slice(messageCountBeforeA);
+  expect(newMessagesForA.some((m) => m.type === "state")).toBe(true);
+  expect(lastState(a.messages)?.status).toBe("active");
+  expect(lastState(a.messages)?.quitRequested).toEqual({ A: true, B: false });
+
+  // B, who did nothing, still gets pushed the updated quitRequested flag —
+  // same broadcastState() path every other action already uses.
+  const newMessagesForB = b.messages.slice(messageCountBeforeB);
+  expect(newMessagesForB.some((m) => m.type === "state")).toBe(true);
+  expect(lastState(b.messages)?.quitRequested).toEqual({ A: true, B: false });
+});
+
+it("clears a pending request for both players when the other one rejects it", async () => {
+  // A's request from the previous test is still pending.
+  const messageCountBeforeA = a.messages.length;
+
+  send(b.ws, { type: "rejectQuit" });
+  await wait(200);
+
+  expect(lastState(b.messages)?.quitRequested).toEqual({ A: false, B: false });
+  // A gets pushed the cleared flag too, not just B who called rejectQuit.
+  const newMessagesForA = a.messages.slice(messageCountBeforeA);
+  expect(newMessagesForA.some((m) => m.type === "state")).toBe(true);
+  expect(lastState(a.messages)?.quitRequested).toEqual({ A: false, B: false });
+  expect(lastState(a.messages)?.status).toBe("active");
+});
+
+it("ends the game with no winner once both players request it, and allows a fresh game afterward", async () => {
+  send(a.ws, { type: "requestQuit" });
+  await wait(100);
+  send(b.ws, { type: "requestQuit" });
+  await wait(200);
+
+  expect(lastState(a.messages)?.status).toBe("abandoned");
+  expect(lastState(b.messages)?.status).toBe("abandoned");
+
+  // The ordinary New Game flow (already covered for "locked"/"finished" in
+  // the engine suite) works the same way for "abandoned" over the real
+  // transport — nothing abandonment-specific needed in confirmNewGame.
+  send(a.ws, { type: "confirmNewGame" });
+  await wait(100);
+  send(b.ws, { type: "confirmNewGame" });
+  await wait(200);
+
+  const freshState = lastState(b.messages);
+  expect(freshState?.status).toBe("active");
+  expect(freshState?.quitRequested).toEqual({ A: false, B: false });
+  expect(freshState?.players.A.hand.length).toBe(3);
+
+  a.ws.close();
+  b.ws.close();
+});
