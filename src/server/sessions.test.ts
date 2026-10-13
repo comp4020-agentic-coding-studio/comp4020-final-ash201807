@@ -10,6 +10,7 @@ import {
   reapExpiredSessions,
   removeFromQueue,
   seatOne,
+  type SessionEntry,
   type SessionMap,
 } from "./sessions.ts";
 
@@ -54,18 +55,27 @@ describe("dequeueOne", () => {
 });
 
 describe("nextOpenSeat", () => {
-  it("returns A for an empty session map", () => {
-    expect(nextOpenSeat({})).toBe("A");
+  it("returns A for no entries at all", () => {
+    expect(nextOpenSeat([])).toBe("A");
   });
 
   it("returns B once A is taken", () => {
-    const sessions: SessionMap = { s1: { player: "A", seriesId: null, disconnectedAt: null } };
-    expect(nextOpenSeat(sessions)).toBe("B");
+    expect(nextOpenSeat([{ player: "A", seriesId: null, disconnectedAt: null }])).toBe("B");
   });
 
   it("returns A if only B happens to be taken (order of arrival determines the slot, not identity)", () => {
-    const sessions: SessionMap = { s1: { player: "B", seriesId: null, disconnectedAt: null } };
-    expect(nextOpenSeat(sessions)).toBe("A");
+    expect(nextOpenSeat([{ player: "B", seriesId: null, disconnectedAt: null }])).toBe("A");
+  });
+
+  it("doesn't look at seriesId at all — it only sees whatever entries the caller chose to pass", () => {
+    // nextOpenSeat has no opinion about which series an entry belongs to;
+    // an entry for seat "A" is "taken" regardless of its seriesId tag. Stage
+    // 4b's own filtering (passing only one series' own entries) is what
+    // makes this correct under concurrency — this function deliberately
+    // stays dumb about series scoping so that filtering logic lives in
+    // exactly one place (the caller), not duplicated here too.
+    const someSeriesA: SessionEntry = { player: "A", seriesId: "some-series", disconnectedAt: null };
+    expect(nextOpenSeat([someSeriesA])).toBe("B");
   });
 });
 

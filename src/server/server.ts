@@ -85,11 +85,16 @@ export function createServer(persistence: Persistence, options: ServerOptions = 
   appState.sessions = normalizeSessions(appState.sessions);
   appState.queue = normalizeQueue(appState.queue);
 
-  // Seated sockets only — the set broadcastState() pushes state to. A
-  // session moves into this map the instant pumpQueue() seats it
-  // (or immediately on a reconnect to an already-seated session), and is
-  // removed on close.
-  const sockets = new Map<WebSocket, PlayerId>();
+  // Seated sockets only — the set broadcastState() pushes state to. Keyed
+  // to the session id, not a cached PlayerId/seriesId: a session's player
+  // never changes once seated, but looking both up fresh from
+  // appState.sessions on every use (rather than caching them here at
+  // connection time) means there's nothing to keep in sync if a session's
+  // seriesId ever changes after seating (Stage 4b: a session whose series
+  // just ended and who's been re-seated into a new one). A session moves
+  // into this map the instant pumpQueue() seats it (or immediately on a
+  // reconnect to an already-seated session), and is removed on close.
+  const sockets = new Map<WebSocket, string>();
   // Sockets for sessions currently in appState.queue, keyed by sessionId —
   // needed so a pairing triggered by some OTHER, unrelated connection (e.g.
   // reaping freed the one active series slot) can still reach these two
@@ -102,10 +107,25 @@ export function createServer(persistence: Persistence, options: ServerOptions = 
     if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(message));
   }
 
-  function broadcastState(): void {
-    const game = currentGame(appState.series);
+  // Stage 4a: takes an explicit seriesId and filters `sockets` down to just
+  // the sessions currently bound to it, rather than assuming every seated
+  // socket belongs to the one series that exists — behaviorally a no-op
+  // today (there IS only one series, so every seated socket qualifies), but
+  // this is the one function Stage 4b's review already identified as the
+  // real cross-series isolation boundary: getting the filter right NOW,
+  // while it's unobservable, means Stage 4b only has to stop assuming
+  // seriesId is fixed, not invent this filtering from scratch under time
+  // pressure once a leak would actually be visible to a second match.
+  function broadcastState(seriesId: string): void {
+    const series = appState.series;
+    if (!series || series.seriesId !== seriesId) return;
+    const game = currentGame(series);
     if (!game) return;
-    for (const ws of sockets.keys()) send(ws, { type: "state", state: game });
+    for (const [ws, sessionId] of sockets) {
+      if (appState.sessions[sessionId]?.seriesId === seriesId) {
+        send(ws, { type: "state", state: game });
+      }
+    }
   }
 
   // Makes sure this browser has a session cookie, without claiming a seat or
@@ -169,13 +189,18 @@ export function createServer(persistence: Persistence, options: ServerOptions = 
       if (!next) break;
 
       appState.queue = next.rest;
-      const seat = nextOpenSeat(appState.sessions);
+      // Stage 4a: still passing every current entry — correct for today's
+      // single-series world (every seated session IS the series being
+      // formed/refilled), and exactly the filtering Stage 4b will narrow to
+      // "only this series' own entries" once more than one can exist.
+      const openEntries = Object.values(appState.sessions).filter((e) => e !== undefined);
+      const seat = nextOpenSeat(openEntries);
       appState.sessions = seatOne(appState.sessions, next.sessionId, seat);
 
       const ws = queuedSockets.get(next.sessionId);
       queuedSockets.delete(next.sessionId);
       if (ws) {
-        sockets.set(ws, seat);
+        sockets.set(ws, next.sessionId);
         send(ws, { type: "assigned", player: seat });
       }
       seatedThisCall.push({ sessionId: next.sessionId, ws });
@@ -199,7 +224,7 @@ export function createServer(persistence: Persistence, options: ServerOptions = 
       appState.sessions = bindActiveSeries(appState.sessions, seriesId);
       appState.series = { seriesId, games: [createInitialState()] };
       persistence.save(appState);
-      broadcastState();
+      broadcastState(seriesId);
       return;
     }
 
@@ -283,7 +308,7 @@ export function createServer(persistence: Persistence, options: ServerOptions = 
       const { sessionId, status, player } = resolveSession(req);
 
       if (status === "seated") {
-        sockets.set(ws, player!);
+        sockets.set(ws, sessionId);
         send(ws, { type: "assigned", player: player! });
         const game = currentGame(appState.series);
         // "waiting" is still reachable: pumpQueue seats one session at a
@@ -326,9 +351,10 @@ export function createServer(persistence: Persistence, options: ServerOptions = 
 
         const entry = appState.sessions[sessionId];
         const game = currentGame(appState.series);
-        if (!entry || !game) return; // not seated in an active series; ignore game actions
+        if (!entry || !entry.seriesId || !game) return; // not seated in an active series; ignore game actions
 
         const seatedPlayer = entry.player;
+        const seriesId = entry.seriesId;
         try {
           if (message.type === "play") {
             playCard(game, seatedPlayer, message.handIndex, message.row, message.col);
@@ -356,7 +382,7 @@ export function createServer(persistence: Persistence, options: ServerOptions = 
         }
 
         persistence.save(appState);
-        broadcastState();
+        broadcastState(seriesId);
       });
 
       ws.on("close", () => {

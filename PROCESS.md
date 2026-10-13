@@ -516,6 +516,68 @@ Stage 2's own already-identified compatibility gap is unchanged, now with
 one more incompatible field, `queue`, added to the same not-yet-authorized
 list); no `git push`, no deploy.
 
+## Stage 4a — fix seat-scoping bug, isolate broadcast by series (behaviour unchanged)
+
+A read-only review (this conversation), covering the full Stage 4 goal
+("multiple independent two-player series concurrently"), recommended
+splitting that goal into 4a/4b/4c/4d rather than one stage — the project
+owner agreed, with three decisions closed first: no fixed cap on concurrent
+series (FIFO keeps pairing as long as players are waiting; resource limits
+are a capacity-testing question, not a product rule, if testing ever
+surfaces one); `CLAUDE.md`'s stale "one shared game, third visitor
+rejected" wording (confirmed stale against Stage 3's own already-shipped
+behaviour) is deferred to 4d rather than fixed piecemeal now; existing
+`spec/game.test.ts` tests are kept and only the ones whose premise is
+actually contradicted get rewritten, rather than restructuring the whole
+suite around concurrency up front.
+
+This sub-stage changes nothing about behaviour — still exactly one active
+series at a time, same as Stage 3 — and exists purely to fix a bug the
+review found and lay groundwork so 4b isn't the first place either gets
+tried:
+
+- **`nextOpenSeat` (`sessions.ts`) took the whole `SessionMap`** and checked
+  globally whether seat `"A"`/`"B"` was taken *anywhere* — harmless today
+  (there's only ever one series' worth of sessions to look at), but
+  confirmed wrong the moment a second concurrent series could exist, since
+  seat identity is only meaningful *within* a series. Now takes an explicit
+  `SessionEntry[]` instead, with zero opinion about `seriesId` at all —
+  filtering which entries are "this series' own" is entirely the caller's
+  job (today: every entry, since there's only one series; Stage 4b: a real
+  filter). Fixing the function's own correctness here, before the filtering
+  that depends on it exists, means Stage 4b only has to change the one call
+  site's filter, not invent and test this scoping logic under time
+  pressure once a leak would actually be observable.
+- **`sockets` (`server.ts`) changed from `Map<WebSocket, PlayerId>` to
+  `Map<WebSocket, sessionId>`** — a cached `PlayerId` has nothing to keep it
+  in sync with if a session's `seriesId` ever changes after being seated
+  (exactly what happens today already, via the known freed-seat-refill
+  limitation); resolving both `player` and `seriesId` fresh from
+  `appState.sessions[sessionId]` on every use removes that staleness risk
+  entirely, for free.
+- **`broadcastState()` now takes an explicit `seriesId` and filters**
+  `sockets` down to sessions currently bound to it, instead of assuming
+  every seated socket belongs to the one series that exists. Behaviourally
+  a no-op today (every seated socket already qualifies, there's nothing
+  else for it to be), but this is the exact function the Stage 4 review
+  named as the real cross-series isolation boundary — getting the filter
+  logic right now, while wrong would be unobservable, is deliberately safer
+  than writing it for the first time once two series actually coexist.
+
+Verified by running the result, not reading code back: `pnpm typecheck`,
+`pnpm test:engine` (88 tests, up one for `nextOpenSeat`'s new signature),
+and the full `pnpm check` black-box suite (13 tests, unchanged count) all
+pass against a real locally running server on a fresh database — confirming
+this sub-stage is exactly the no-behaviour-change refactor it was meant to
+be.
+
+**Not yet done (by design — this is 4a, not 4b):** `appState.series` is
+still a single `SeriesState | null`, `pumpQueue()` still has the
+`sessions.length < 2` ceiling that caps the app at one active series, and
+the message handler/`currentGame` still resolve against that one global
+reference rather than a per-session lookup into a keyed collection. None of
+Stage 4's actual product goal (concurrent series) is enabled yet.
+
 ## Not yet built
 
 The real client UI — the current one is a bare, unstyled debug page — and
@@ -523,25 +585,44 @@ the Expansion/Board-Locked/New-Game/voluntary-termination surfaced in it;
 `quitRequested` specifically has no UI at all yet. The lobby/join-queue
 step added in Stage 3 is likewise bare — a single unstyled button.
 
-Stage 9's decision is mostly still design-only; Stages 2 and 3 above are
-the implemented slices so far. Still not implemented:
-- True concurrency — multiple series existing and being broadcast to at
-  once (`sockets`/`broadcastState` still assume exactly one active series,
-  via the `currentGame` accessor). Stage 3's queue is correct but still
-  bottlenecked to one active series until this lands.
-- Best-of-three score tracking and the next-game-in-series handoff.
+Stage 9's decision is mostly still design-only; Stages 2, 3, and 4a above
+are the implemented slices so far. Still not implemented:
+- **Stage 4b** — true concurrency itself: `appState.series` becoming a
+  keyed `Record<seriesId, SeriesState>`, `pumpQueue()` draining pairs with
+  no ceiling instead of one session at a time, the message handler
+  resolving `game` per-session instead of via one global reference. The
+  review named this the highest-risk sub-stage (a broadcast-isolation bug
+  here means one match's private state leaking to an unrelated player) and
+  it needs its own cross-series-isolation tests before being considered
+  done, not just a happy-path two-series check.
+- **Stage 4c** — verification-only: actually killing and restarting the
+  server process with 2+ concurrent in-progress series live, confirming
+  each is restored correctly and none bleed into each other. Never tested
+  by anyone before, even by this repo's own established restart-testing
+  habit (Stage 8a's single-series version of this exact check).
+- **Stage 4d** — fixing `CLAUDE.md`'s stale "one shared game, third visitor
+  rejected" section (confirmed contradicted by Stage 3's own already-
+  shipped behaviour) and cross-checking `README.md`/`PROCESS.md` against
+  whatever Stage 4b actually ships, once it's stable enough to describe
+  accurately — deliberately deferred rather than updated piecemeal per-
+  sub-stage.
+- Best-of-three score tracking and the next-game-in-series handoff —
+  confirmed orthogonal to Stage 4's own `seriesList` keying (a series' own
+  `games: GameState[]` already supports more than one entry structurally),
+  not blocked by anything above.
 - The per-series generalization of Stage 8a's disconnect-grace mechanism
-  (still global/single-series today), plus the new series-forfeit and
-  single-sided-quit actions Stage 9 agreed to.
+  (still global/single-series today — Stage 4b's own scope), plus the new
+  series-forfeit and single-sided-quit actions Stage 9 agreed to.
 - The "continue this game vs. start a new game" redesign — Stage 3
   deliberately preserved rather than fixed the known freed-seat-replaces-
   whole-series limitation; see above.
 - Clearing the live deployment's old-shape persisted game (`game`/no
-  `queue` field, pre-Stage-2/3) — not yet authorized or done.
+  `queue` field, pre-Stage-2/3, soon also no `seriesList` once 4b lands) —
+  not yet authorized or done.
 
 Each further step gets its own explicit go-ahead before code changes, per
-this repo's own `CLAUDE.md` — Stages 2 and 3 above were each reviewed
+this repo's own `CLAUDE.md` — Stages 2, 3, and 4a above were each reviewed
 read-only first, then implemented only once separately authorized, and the
-same applies to deploying either.
+same applies to deploying any of them.
 
 This file is rewritten, not appended to, each time.

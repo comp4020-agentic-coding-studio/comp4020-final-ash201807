@@ -59,12 +59,20 @@ export function dequeueOne(queue: string[]): { sessionId: string; rest: string[]
   return { sessionId, rest };
 }
 
-// Pure: which of the two player identities isn't already held by an entry
-// in `sessions` — mirrors the pre-Stage-3 joinSession's own `taken` logic
-// exactly, just factored out so pumpQueue can call it once per seating
-// step rather than it being buried inside a single two-argument function.
-export function nextOpenSeat(sessions: SessionMap): PlayerId {
-  const taken = new Set(Object.values(sessions).map((entry) => entry!.player));
+// Pure: which of the two player identities isn't already held by any of
+// the given entries. Stage 4a: deliberately takes an explicit array rather
+// than a whole SessionMap — under Stage 3's still-one-series-at-a-time
+// model the caller could get away with passing literally every session
+// there was (there was only ever one series' worth), but that's a latent
+// bug once more than one series can exist concurrently: scanning every
+// session EVERYWHERE for a taken "A"/"B" is meaningless once seat
+// identities are only unique WITHIN a series, not globally. Pushing the
+// filtering responsibility onto the caller now (passing only the entries
+// relevant to the specific series being formed or refilled) means this
+// function itself is already correct for Stage 4b without needing to
+// change again — only the caller's filtering needs to get smarter later.
+export function nextOpenSeat(entries: SessionEntry[]): PlayerId {
+  const taken = new Set(entries.map((entry) => entry.player));
   return taken.has("A") ? "B" : "A";
 }
 
