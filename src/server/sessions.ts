@@ -2,12 +2,12 @@ import type { PlayerId } from "../game/types.ts";
 
 export interface SessionEntry {
   player: PlayerId;
-  // Which series this session is bound to. Always non-null once an entry
-  // exists at all — under Stage 3's queue model, a SessionEntry is only ever
-  // created by seatPlayers() at the exact moment a pairing completes, so
-  // there's no longer an intermediate "has a seat but no series yet" state
-  // the way there briefly was in Stage 2. Kept nullable in the type purely
-  // for normalizeSessions' pre-Stage-2 upgrade path below.
+  // Which series this session is bound to. Always set to a real series the
+  // instant a SessionEntry is created at all — Stage 4b's seatPair creates
+  // both players' entries and their shared series atomically, so there's no
+  // intermediate "has a seat but no series yet" state. Kept nullable in the
+  // type purely for normalizeSessions' pre-Stage-2 upgrade path below, which
+  // has no way to know what series an old bare-PlayerId row belonged to.
   seriesId: string | null;
   // epoch ms when this session's last socket closed with no replacement
   // connected since; null while a live connection is on file. Read only as a
@@ -24,7 +24,7 @@ export type SessionMap = Partial<Record<string, SessionEntry>>;
 // Stage 3: a session that hasn't been seated yet (no SessionEntry) waits in
 // a plain FIFO array of session ids — "queued" needs no richer state than
 // "present in this list", since nothing about a queued session is known yet
-// beyond its identity. Seating (seatPlayers, below) is the one and only
+// beyond its identity. Seating (seatPair, below) is the one and only
 // transition out of the queue into a SessionEntry.
 
 // Pure: appends sessionId to the back of the queue unless it's already
@@ -46,65 +46,67 @@ export function removeFromQueue(queue: string[], sessionId: string): string[] {
   return queue.filter((id) => id !== sessionId);
 }
 
-// Pure: dequeues the single front (longest-waiting) session id, if any —
-// the atomic unit Stage 3's seating loop operates on. One at a time, not
-// two, so that a lone queued session can take over a seat vacated by a
-// disconnected-and-reaped player while the OTHER, still-connected player
-// keeps theirs (see server.ts's pumpQueue) — matching Stage 8a's original
-// one-arrival-at-a-time granularity, now sourced from the queue instead of
-// directly from a new connection.
-export function dequeueOne(queue: string[]): { sessionId: string; rest: string[] } | null {
-  if (queue.length === 0) return null;
-  const [sessionId, ...rest] = queue;
-  return { sessionId, rest };
+// Pure: if at least two are waiting, dequeues the front two — the two
+// longest-waiting, per Stage 9's FIFO rule — and returns them plus the
+// remaining queue; null if fewer than two are waiting. Stage 4b: this is
+// now the ONLY way sessions leave the queue to become seated — always as a
+// complete pair, never one at a time. That's possible (and correct) because
+// Stage 4b also adopted the project owner's confirmed forfeit rule: a
+// seated session whose grace period expires forfeits its WHOLE series
+// rather than having its lone seat quietly refilled by a stranger (see
+// server.ts's reapAndSettleSeries) — so there is never a partially-seated
+// series sitting around needing a single new arrival to complete it. Every
+// series that exists has exactly two sessions, from the moment it's created
+// until the moment it ends.
+export function dequeuePair(queue: string[]): { first: string; second: string; rest: string[] } | null {
+  if (queue.length < 2) return null;
+  const [first, second, ...rest] = queue;
+  return { first, second, rest };
 }
 
-// Pure: which of the two player identities isn't already held by any of
-// the given entries. Stage 4a: deliberately takes an explicit array rather
-// than a whole SessionMap — under Stage 3's still-one-series-at-a-time
-// model the caller could get away with passing literally every session
-// there was (there was only ever one series' worth), but that's a latent
-// bug once more than one series can exist concurrently: scanning every
-// session EVERYWHERE for a taken "A"/"B" is meaningless once seat
-// identities are only unique WITHIN a series, not globally. Pushing the
-// filtering responsibility onto the caller now (passing only the entries
-// relevant to the specific series being formed or refilled) means this
-// function itself is already correct for Stage 4b without needing to
-// change again — only the caller's filtering needs to get smarter later.
-export function nextOpenSeat(entries: SessionEntry[]): PlayerId {
-  const taken = new Set(entries.map((entry) => entry.player));
-  return taken.has("A") ? "B" : "A";
+// Pure: seats two freshly-dequeued session ids as Player A/B of a brand new
+// series, atomically — both entries are created with the given seriesId
+// already set, not seriesId: null followed by a separate binding step,
+// since under Stage 4b's model a pairing and its series are created
+// together in one step, never one session seated alone waiting for a
+// partner to arrive later (dequeuePair already guarantees there IS a
+// partner, since it only ever returns a complete pair or nothing at all).
+export function seatPair(sessions: SessionMap, seriesId: string, first: string, second: string): SessionMap {
+  return {
+    ...sessions,
+    [first]: { player: "A", seriesId, disconnectedAt: null },
+    [second]: { player: "B", seriesId, disconnectedAt: null },
+  };
 }
 
-// Pure: seats a single freshly-dequeued session id as the given player,
-// with no series bound yet (null) — set once a second session completes
-// the pair, via bindActiveSeries below. This is the only way a SessionEntry
-// is created under Stage 3's model; callers must only pass ids that came
-// from dequeueOne (and so, by construction, held no SessionEntry yet).
-export function seatOne(sessions: SessionMap, sessionId: string, player: PlayerId): SessionMap {
-  return { ...sessions, [sessionId]: { player, seriesId: null, disconnectedAt: null } };
+// Pure: every session id currently bound to the given seriesId. Used by
+// server.ts's reapAndSettleSeries to decide, after reaping, whether a
+// series still has both its players (nothing to do), exactly one (forfeit
+// to that survivor), or none (abandoned, nobody to notify) — see that
+// function's own comment for the three-way split.
+export function sessionsInSeries(sessions: SessionMap, seriesId: string): string[] {
+  return Object.entries(sessions)
+    .filter(([, entry]) => entry?.seriesId === seriesId)
+    .map(([id]) => id);
 }
 
-// Stamps the given seriesId onto every entry currently in `sessions` — used
-// the instant a second session's seating brings the count to two, so both
-// the newly-seated arrival AND any already-seated survivor (whose own
-// seriesId was from whatever series just ended) end up bound to the same
-// fresh one.
-export function bindActiveSeries(sessions: SessionMap, seriesId: string): SessionMap {
-  const next: SessionMap = {};
-  for (const [id, entry] of Object.entries(sessions)) {
-    if (!entry) continue;
-    next[id] = { ...entry, seriesId };
-  }
-  return next;
+// Pure: removes a single session's entry entirely (not just marking it
+// disconnected) — a no-op (same reference) if it's already gone. Used when
+// a series ends by forfeit or abandonment: the surviving player's own
+// SessionEntry is released too, not just the departed one's, since Stage
+// 9's rule is that BOTH players return to the lobby and must explicitly
+// re-queue, not that the survivor's seat is kept warm for a replacement
+// opponent.
+export function releaseSession(sessions: SessionMap, sessionId: string): SessionMap {
+  if (!(sessionId in sessions)) return sessions;
+  const { [sessionId]: _removed, ...rest } = sessions;
+  return rest;
 }
 
 // Marks a known session's socket as closed, starting its grace period. A
 // no-op for an unknown sessionId — nothing to mark. Call again on a later
 // close (e.g. a reconnect that itself disconnects again); the new timestamp
-// simply replaces the old one. Only meaningful for a SEATED session — a
-// merely queued one is removed outright by removeFromQueue instead (see
-// server.ts's close handler for the branch between the two).
+// simply replaces the old one.
 export function markDisconnected(sessions: SessionMap, sessionId: string, now: number): SessionMap {
   const existing = sessions[sessionId];
   if (!existing) return sessions;
@@ -114,8 +116,9 @@ export function markDisconnected(sessions: SessionMap, sessionId: string, now: n
 // Drops every session whose grace period has fully elapsed as of `now` — a
 // plain wall-clock comparison, not a scheduled callback, so it gives the
 // right answer whether it runs 10ms or 10 hours after the disconnect. The
-// caller (server.ts) is responsible for noticing when this empties the map
-// entirely and clearing the series that went with it.
+// caller (server.ts) is responsible for noticing which series this leaves
+// short a player (or two) and settling those series — see
+// reapAndSettleSeries.
 export function reapExpiredSessions(sessions: SessionMap, now: number, graceMs: number): SessionMap {
   const next: SessionMap = {};
   for (const [id, entry] of Object.entries(sessions)) {

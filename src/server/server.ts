@@ -5,19 +5,19 @@ import { WebSocketServer, type WebSocket } from "ws";
 import { confirmNewGame, createInitialState, drawCard, endTurn, playCard, rejectQuit, requestQuit } from "../game/engine.ts";
 import type { GameState, PlayerId } from "../game/types.ts";
 import { parseSessionId, sessionCookieHeader } from "./cookies.ts";
-import type { Persistence, SeriesState } from "./persistence.ts";
+import { normalizeSeriesList, type Persistence } from "./persistence.ts";
 import type { ClientMessage, ServerMessage } from "./protocol.ts";
 import {
-  bindActiveSeries,
-  dequeueOne,
+  dequeuePair,
   enqueue,
   markDisconnected,
-  nextOpenSeat,
   normalizeQueue,
   normalizeSessions,
   reapExpiredSessions,
+  releaseSession,
   removeFromQueue,
-  seatOne,
+  seatPair,
+  sessionsInSeries,
 } from "./sessions.ts";
 
 function newSessionId(): string {
@@ -30,22 +30,15 @@ function newSeriesId(): string {
   return randomBytes(16).toString("hex");
 }
 
-// Stage 2/3 keep exactly one series alive at a time, so "the current game"
-// is always games[0] — this accessor is the one place that assumption
-// lives, instead of every call site spelling out series.games[0] directly.
-function currentGame(series: SeriesState | null): GameState | null {
-  return series?.games[0] ?? null;
-}
-
 export interface ServerOptions {
-  // How long a disconnected SEATED session keeps its player slot before
-  // it's freed — long enough that an ordinary page reload (close then
-  // immediately reopen with the same cookie) never loses the seat. Injectable
-  // so spec/ can run this in milliseconds instead of really waiting; defaults
-  // to the real 30s grace period otherwise. Only applies to a seated
-  // session — a merely QUEUED session that disconnects is dropped outright,
-  // no grace period at all (Stage 9/3's own rule: it never held a seat with
-  // state at stake).
+  // How long a disconnected SEATED session keeps its player slot before its
+  // whole series forfeits — long enough that an ordinary page reload (close
+  // then immediately reopen with the same cookie) never costs the match.
+  // Injectable so spec/ can run this in milliseconds instead of really
+  // waiting; defaults to the real 30s grace period otherwise. Only applies
+  // to a seated session — a merely QUEUED session that disconnects is
+  // dropped outright, no grace period at all (Stage 9's own rule: it never
+  // held a seat with state at stake).
   disconnectGraceMs?: number;
 }
 
@@ -81,45 +74,43 @@ export function createServer(persistence: Persistence, options: ServerOptions = 
   // rows have no seriesId; upgrade both once, here, before anything else
   // reads appState.sessions (see normalizeSessions' own comment for why
   // guessing wrong here is dangerous). Pre-Stage-3 blobs have no `queue`
-  // field at all — normalizeQueue reads that as nobody queued.
+  // field at all. Pre-Stage-4b blobs have a single `series`, not a keyed
+  // `seriesList` — normalizeSeriesList reads that (or anything else
+  // unrecognized) as "no series active" rather than misreading it.
   appState.sessions = normalizeSessions(appState.sessions);
   appState.queue = normalizeQueue(appState.queue);
+  appState.seriesList = normalizeSeriesList(appState.seriesList);
 
-  // Seated sockets only — the set broadcastState() pushes state to. Keyed
-  // to the session id, not a cached PlayerId/seriesId: a session's player
-  // never changes once seated, but looking both up fresh from
-  // appState.sessions on every use (rather than caching them here at
-  // connection time) means there's nothing to keep in sync if a session's
-  // seriesId ever changes after seating (Stage 4b: a session whose series
-  // just ended and who's been re-seated into a new one). A session moves
-  // into this map the instant pumpQueue() seats it (or immediately on a
-  // reconnect to an already-seated session), and is removed on close.
+  // Seated sockets only — keyed to the session id, not a cached
+  // PlayerId/seriesId: resolving both fresh from appState.sessions on every
+  // use (rather than caching them here at connection time) means there's
+  // nothing to keep in sync if a session's seriesId ever changed after
+  // seating. A session moves into this map the instant a pairing seats it
+  // (or immediately on a reconnect to an already-seated session), and is
+  // removed on close.
   const sockets = new Map<WebSocket, string>();
   // Sockets for sessions currently in appState.queue, keyed by sessionId —
-  // needed so a pairing triggered by some OTHER, unrelated connection (e.g.
-  // reaping freed the one active series slot) can still reach these two
-  // sessions' own open sockets to tell them they've been seated. A session
-  // with no entry here and no entry in `sockets` is just sitting in the
-  // lobby, having connected but not yet sent joinQueue.
+  // needed so a pairing triggered by some OTHER, unrelated connection can
+  // still reach these sessions' own open sockets to tell them they've been
+  // seated. A session with no entry here and no entry in `sockets` is just
+  // sitting in the lobby, having connected but not yet sent joinQueue.
   const queuedSockets = new Map<string, WebSocket>();
 
   function send(ws: WebSocket, message: ServerMessage): void {
     if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(message));
   }
 
-  // Stage 4a: takes an explicit seriesId and filters `sockets` down to just
-  // the sessions currently bound to it, rather than assuming every seated
-  // socket belongs to the one series that exists — behaviorally a no-op
-  // today (there IS only one series, so every seated socket qualifies), but
-  // this is the one function Stage 4b's review already identified as the
-  // real cross-series isolation boundary: getting the filter right NOW,
-  // while it's unobservable, means Stage 4b only has to stop assuming
-  // seriesId is fixed, not invent this filtering from scratch under time
-  // pressure once a leak would actually be visible to a second match.
+  function currentGame(seriesId: string): GameState | null {
+    return appState.seriesList[seriesId]?.games[0] ?? null;
+  }
+
+  // Stage 4b: takes an explicit seriesId and filters `sockets` down to just
+  // the sessions currently bound to IT — this is the real cross-series
+  // isolation boundary (Stage 4's read-only review's own finding): with N
+  // independent series now possible, "every seated socket" is no longer a
+  // safe recipient list for any one series' state.
   function broadcastState(seriesId: string): void {
-    const series = appState.series;
-    if (!series || series.seriesId !== seriesId) return;
-    const game = currentGame(series);
+    const game = currentGame(seriesId);
     if (!game) return;
     for (const [ws, sessionId] of sockets) {
       if (appState.sessions[sessionId]?.seriesId === seriesId) {
@@ -140,101 +131,98 @@ export function createServer(persistence: Persistence, options: ServerOptions = 
     }
   }
 
-  // If the active series' sessions have all been reaped (both seated players
-  // disconnected past their grace period), the series itself is cleared —
-  // nobody is left to have it with. Pure wall-clock comparison against a
-  // persisted timestamp, not a running timer, so this gives the right answer
-  // even if the server process was stopped (Fly auto-stops the machine while
-  // nobody's connected) for the entire grace period and only just woke back
-  // up for this request — same reasoning as Stage 8a, now scoped to
-  // whichever series is currently active rather than "the one global game".
-  function reapAndFreeSeries(): void {
-    appState.sessions = reapExpiredSessions(appState.sessions, Date.now(), disconnectGraceMs);
-    if (Object.keys(appState.sessions).length === 0) {
-      appState.series = null;
+  // Reaps every session whose grace period has fully elapsed (a plain
+  // wall-clock comparison against a persisted timestamp — never a running
+  // timer, so this gives the right answer even if the server process was
+  // stopped, which Fly does whenever nobody's connected, for the entire
+  // grace period and only just woke back up for this request), then
+  // settles any series that reaping left short a player.
+  //
+  // Per the project owner's confirmed decision: a seated session whose
+  // grace period expires forfeits its WHOLE series, it does not have its
+  // lone seat quietly refilled by a stranger (that was Stage 3's model;
+  // Stage 4b replaces it, since "refill one seat, replace the whole
+  // series underneath the still-connected survivor with no consent" was
+  // already a known limitation, not something to generalize to N
+  // concurrent series). Concretely, for each series that had ANY of its
+  // sessions reaped: if it still has both sessions, nothing happened to
+  // it (the reaped session belonged to a different series); if it has
+  // exactly one left, that player wins the series by forfeit — a terminal
+  // message is sent to them (their own series.games[0] is left completely
+  // untouched per that same decision: the engine/GameState never learns
+  // anything about a forfeit, it's purely a server-level settlement) and
+  // their own SessionEntry is released so they return to the lobby and
+  // must explicitly re-queue, exactly like any other ended series; if
+  // zero are left (both players' grace periods expired, however close
+  // together — this whole function runs as one synchronous pass over a
+  // single reap(), so "close together" can never actually race here),
+  // the series is abandoned with no winner, per the project owner's own
+  // closed decision in PROCESS.md's Stage 9 entry. Either way the series
+  // itself is removed from seriesList — settling it twice is impossible
+  // by construction, since the second time there's nothing left in
+  // sessionsInSeries to find.
+  function reapAndSettleSeries(): void {
+    const before = appState.sessions;
+    appState.sessions = reapExpiredSessions(before, Date.now(), disconnectGraceMs);
+
+    const affectedSeriesIds = new Set<string>();
+    for (const [id, entry] of Object.entries(before)) {
+      if (entry?.seriesId && !(id in appState.sessions)) affectedSeriesIds.add(entry.seriesId);
     }
+
+    for (const seriesId of affectedSeriesIds) {
+      const remaining = sessionsInSeries(appState.sessions, seriesId);
+      if (remaining.length === 2) continue; // only an unrelated session in this series expired
+
+      if (remaining.length === 1) {
+        const survivorSessionId = remaining[0];
+        for (const [ws, sid] of sockets) {
+          if (sid === survivorSessionId) {
+            send(ws, { type: "seriesEnded", reason: "opponentDisconnected" });
+            sockets.delete(ws);
+            break;
+          }
+        }
+        appState.sessions = releaseSession(appState.sessions, survivorSessionId);
+      }
+      // remaining.length === 0: both players gone, abandoned, nobody to notify.
+
+      delete appState.seriesList[seriesId];
+    }
+
     persistence.save(appState);
   }
 
-  // Stage 3's one and only pairing path, one session at a time — the same
-  // granularity the pre-Stage-3 joinSession used (a single connecting
-  // session either takes a free seat or doesn't), just now sourced from the
-  // persisted queue instead of directly from whichever request happens to
-  // be connecting. This deliberately preserves Stage 8a's existing
-  // behaviour: if a seat frees while the OTHER player is still seated and
-  // connected, the next queued session takes over that ONE seat — not a
-  // pair plucked together — and bindActiveSeries (below) then binds BOTH
-  // the new arrival and the untouched survivor to a fresh series, exactly
-  // as before (a known, already-documented limitation: the survivor's whole
-  // match is replaced too, not resumed; fixing that is a later stage, not
-  // this one).
-  //
-  // Only ever seats while fewer than two sessions are seated, and only ever
-  // starts a fresh series the moment that count reaches exactly two — this
-  // stage still runs exactly one series at a time, so a third-or-later
-  // queued session simply keeps waiting, however long the active series
-  // takes, until a seat actually frees.
-  //
-  // Called after every reap (a slot may have just freed, independent of who
-  // triggered the connection) and after every joinQueue (the queue may have
-  // just grown, or a seat may already be free) — both are the only two ways
-  // the queue's contents or the open-seat count can change, so there's no
-  // scenario needing a scheduled/background trigger (same reasoning Stage
-  // 8a already established for reaping).
+  // Drains the FIFO queue, pairing the two longest-waiting sessions into a
+  // brand new series, repeating as long as at least two remain — no
+  // ceiling on how many series can be formed in one call (Stage 4b's whole
+  // point: 4 waiting sessions means 2 independent series from a single
+  // joinQueue). Each pairing is atomic: seatPair creates both SessionEntrys
+  // and their shared seriesId together (see sessions.ts's own comment on
+  // why there's no longer an intermediate "one seat filled, waiting for a
+  // partner" state under this stage's forfeit-not-refill model).
   function pumpQueue(): void {
-    const seatedThisCall: Array<{ sessionId: string; ws: WebSocket | undefined }> = [];
+    for (;;) {
+      const pair = dequeuePair(appState.queue);
+      if (!pair) break;
 
-    while (Object.keys(appState.sessions).length < 2) {
-      const next = dequeueOne(appState.queue);
-      if (!next) break;
-
-      appState.queue = next.rest;
-      // Stage 4a: still passing every current entry — correct for today's
-      // single-series world (every seated session IS the series being
-      // formed/refilled), and exactly the filtering Stage 4b will narrow to
-      // "only this series' own entries" once more than one can exist.
-      const openEntries = Object.values(appState.sessions).filter((e) => e !== undefined);
-      const seat = nextOpenSeat(openEntries);
-      appState.sessions = seatOne(appState.sessions, next.sessionId, seat);
-
-      const ws = queuedSockets.get(next.sessionId);
-      queuedSockets.delete(next.sessionId);
-      if (ws) {
-        sockets.set(ws, next.sessionId);
-        send(ws, { type: "assigned", player: seat });
-      }
-      seatedThisCall.push({ sessionId: next.sessionId, ws });
-    }
-
-    // Only treat this as "a pair just completed" if THIS call's dequeuing is
-    // what brought the seated count up to two — not merely because it
-    // already happened to be two before this call started (e.g. a third
-    // visitor's unrelated joinQueue, with an unrelated match already in
-    // progress, must never retrigger this branch and wipe that match).
-    // Unconditional once that's true — deliberately NOT gated on whether
-    // appState.series already holds a stale reference: Stage 8a's own
-    // already-documented limitation is that refilling a single freed seat
-    // (the OTHER player's session never having been reaped) still replaces
-    // the whole series, survivor's progress included. Stage 3 preserves
-    // that exact behaviour rather than fixing it — the fix is a separate,
-    // not-yet-authorized later stage (PROCESS.md's "continue vs. new game"
-    // redesign).
-    if (seatedThisCall.length > 0 && Object.keys(appState.sessions).length === 2) {
+      const { first, second, rest } = pair;
+      appState.queue = rest;
       const seriesId = newSeriesId();
-      appState.sessions = bindActiveSeries(appState.sessions, seriesId);
-      appState.series = { seriesId, games: [createInitialState()] };
+      appState.sessions = seatPair(appState.sessions, seriesId, first, second);
+      appState.seriesList[seriesId] = { seriesId, games: [createInitialState()] };
+
+      for (const [sessionId, seat] of [[first, "A"], [second, "B"]] as const) {
+        const ws = queuedSockets.get(sessionId);
+        queuedSockets.delete(sessionId);
+        if (ws) {
+          sockets.set(ws, sessionId);
+          send(ws, { type: "assigned", player: seat });
+        }
+      }
+
       persistence.save(appState);
       broadcastState(seriesId);
-      return;
-    }
-
-    persistence.save(appState);
-    // No pair completed this call: anyone freshly seated this round (there
-    // can be at most one — seating a second would have completed a pair
-    // above) is seated alone, waiting for an opponent, same as a lone
-    // connecting session always has been since before Stage 3.
-    for (const { ws } of seatedThisCall) {
-      if (ws) send(ws, { type: "waiting" });
     }
   }
 
@@ -250,7 +238,7 @@ export function createServer(persistence: Persistence, options: ServerOptions = 
     status: "seated" | "queued" | "new";
     player?: PlayerId;
   } {
-    reapAndFreeSeries();
+    reapAndSettleSeries();
     pumpQueue();
 
     const sessionId = parseSessionId(req.headers.cookie) ?? newSessionId();
@@ -310,10 +298,8 @@ export function createServer(persistence: Persistence, options: ServerOptions = 
       if (status === "seated") {
         sockets.set(ws, sessionId);
         send(ws, { type: "assigned", player: player! });
-        const game = currentGame(appState.series);
-        // "waiting" is still reachable: pumpQueue seats one session at a
-        // time, so the first of a pair to be seated has no series yet until
-        // a second one arrives — same state Stage 2 already had.
+        const entry = appState.sessions[sessionId];
+        const game = entry?.seriesId ? currentGame(entry.seriesId) : null;
         if (game) send(ws, { type: "state", state: game });
         else send(ws, { type: "waiting" });
       } else if (status === "queued") {
@@ -350,11 +336,11 @@ export function createServer(persistence: Persistence, options: ServerOptions = 
         }
 
         const entry = appState.sessions[sessionId];
-        const game = currentGame(appState.series);
-        if (!entry || !entry.seriesId || !game) return; // not seated in an active series; ignore game actions
+        const seriesId = entry?.seriesId;
+        const game = seriesId ? currentGame(seriesId) : null;
+        if (!entry || !seriesId || !game) return; // not seated in an active series; ignore game actions
 
         const seatedPlayer = entry.player;
-        const seriesId = entry.seriesId;
         try {
           if (message.type === "play") {
             playCard(game, seatedPlayer, message.handIndex, message.row, message.col);
@@ -368,7 +354,7 @@ export function createServer(persistence: Persistence, options: ServerOptions = 
             // mutate the existing one in place — the reassignment here is
             // load bearing, not cosmetic. Session identities
             // (appState.sessions) are untouched either way.
-            appState.series!.games[0] = confirmNewGame(game, seatedPlayer);
+            appState.seriesList[seriesId].games[0] = confirmNewGame(game, seatedPlayer);
           } else if (message.type === "requestQuit") {
             requestQuit(game, seatedPlayer);
           } else if (message.type === "rejectQuit") {
@@ -390,7 +376,7 @@ export function createServer(persistence: Persistence, options: ServerOptions = 
         queuedSockets.delete(sessionId);
 
         // Queued (no seat yet): removed outright, no grace period — it
-        // never held a seat with state at stake (Stage 9/3's own rule).
+        // never held a seat with state at stake (Stage 9's own rule).
         if (appState.queue.includes(sessionId)) {
           appState.queue = removeFromQueue(appState.queue, sessionId);
           persistence.save(appState);
@@ -398,12 +384,12 @@ export function createServer(persistence: Persistence, options: ServerOptions = 
         }
 
         if (appState.sessions[sessionId]) {
-          // Starts this session's grace period rather than freeing its slot
-          // outright — an ordinary page reload is also a close, and must not
-          // lose a match actually in progress. Persisted immediately: the
-          // process may be stopped (Fly auto-stops on no connections) for
-          // the entire grace period, so this timestamp, not a live timer, is
-          // what the next request checks.
+          // Starts this session's grace period rather than settling its
+          // series outright — an ordinary page reload is also a close, and
+          // must not forfeit a match actually in progress. Persisted
+          // immediately: the process may be stopped (Fly auto-stops on no
+          // connections) for the entire grace period, so this timestamp,
+          // not a live timer, is what the next request checks.
           // NOTE: if the same session has more than one socket open at once
           // (e.g. two tabs), closing either one marks the whole session
           // disconnected even though the other tab is still live — a known

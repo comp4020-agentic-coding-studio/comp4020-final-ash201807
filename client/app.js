@@ -40,6 +40,13 @@ ws.addEventListener("message", (event) => {
   } else if (message.type === "state") {
     lastState = message.state;
     render(lastState);
+  } else if (message.type === "seriesEnded") {
+    myPlayer = null;
+    lastState = null;
+    boardEl.textContent = "";
+    handEl.textContent = "";
+    joinQueueBtn.style.display = "";
+    statusEl.textContent = "Your opponent disconnected and didn't return — you win by forfeit. Click \"Join queue\" to start a new match.";
   } else if (message.type === "error") {
     log("[server error] " + message.message);
   }

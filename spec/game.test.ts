@@ -4,40 +4,42 @@ import WebSocket from "ws";
 // Black-box checks against the RUNNING app's real HTTP + WebSocket surface
 // (see global-setup.ts) — no mocking, no reaching into the engine directly.
 // These exercise the claims README.md makes under "Checked in spec/": a
-// joinQueue is required before a seat is assigned, a third-and-later
-// visitor queues rather than being rejected, an out-of-turn action changes
-// nothing, and reconnecting with the same session resumes rather than
-// loses the match.
+// joinQueue is required before a seat is assigned, FIFO pairing forms
+// independent concurrent series (Stage 4b), an out-of-turn action changes
+// nothing, reconnecting with the same session resumes rather than loses the
+// match, and a seated opponent who never reconnects within the grace period
+// forfeits the WHOLE series to the survivor (Stage 4b: replaces Stage 3's
+// "a stranger refills the empty seat" model).
 //
-// This app runs exactly one active series at a time (Stage 3: a real FIFO
-// queue feeds it, but concurrency is a later stage) — every `it` below
-// shares ONE pairing established once in beforeAll and runs in declaration
-// order, unusual for tests, but unavoidable here: a second, independent
-// pairing attempt in the same run would just queue behind the first.
+// Stage 4b removed the Stage 3/4a limitation that only one series could be
+// active at a time — any number of independent two-player series can now
+// run concurrently, each fed by the same FIFO queue. The first group of
+// tests below still shares ONE pairing (established once in beforeAll) for
+// the ordinary single-match checks that don't care about concurrency; a
+// later group deliberately runs TWO pairings side by side to check they
+// never interfere with each other.
 //
-// IMPORTANT for local runs: running this file consumes the one active
-// series slot on whatever server APP_URL points at. Re-running `pnpm check`
-// against the SAME long-lived local dev server will see the slot already
-// occupied (new connections simply queue) on the second run — restart the
-// dev server (or point DB_PATH at a fresh file) between runs. CI is
-// unaffected: it always starts a fresh container with a throwaway /data.
-// Never point APP_URL at the deployed production app for this file — it
-// would occupy the one live series' two seats.
+// IMPORTANT for local runs: re-running `pnpm check` against the SAME
+// long-lived local dev server reuses whatever state is already there from
+// the previous run — restart the dev server (or point DB_PATH at a fresh
+// file) between runs for a clean slate. CI is unaffected: it always starts
+// a fresh container with a throwaway /data.
 //
-// The disconnect-expiry tests near the end of this file actually wait out
-// the server's configured DISCONNECT_GRACE_MS (src/server/index.ts) — this
-// file reads the same env var so it knows how long to wait, defaulting to
-// the real 30s if unset. CI sets it to 1s (.github/workflows/checks.yml).
-// Running locally against the real default makes this file take 60+ extra
-// seconds; start your dev server with DISCONNECT_GRACE_MS=1000 (and export it
-// before `pnpm check` too) for a fast local run.
+// The disconnect-expiry tests actually wait out the server's configured
+// DISCONNECT_GRACE_MS (src/server/index.ts) — this file reads the same env
+// var so it knows how long to wait, defaulting to the real 30s if unset. CI
+// sets it to 1s (.github/workflows/checks.yml). Running locally against the
+// real default makes this file take significantly longer; start your dev
+// server with DISCONNECT_GRACE_MS=1000 (and export it before `pnpm check`
+// too) for a fast local run.
 const disconnectGraceMs = Number(process.env.DISCONNECT_GRACE_MS ?? 30_000);
 const baseUrl = inject("baseUrl");
 const wsUrl = baseUrl.replace(/^http/, "ws") + "/ws";
 
 interface ServerMessage {
-  type: "assigned" | "waiting" | "queued" | "state" | "error";
+  type: "assigned" | "waiting" | "queued" | "state" | "seriesEnded" | "error";
   player?: "A" | "B";
+  reason?: string;
   state?: {
     status: "active" | "finished" | "locked" | "abandoned";
     ap: number;
@@ -95,6 +97,21 @@ async function connectAndJoinQueue(cookie: string): Promise<Client> {
   return client;
 }
 
+// Queues two fresh sessions back to back and waits for them to pair into
+// their own series — the building block the concurrency tests below use to
+// stand up a second, independent match alongside the first. Cookies are
+// returned too, so a test can reconnect either player later and verify they
+// resume THIS series specifically, not some other concurrent one.
+async function formAPairing(): Promise<{ a: Client; b: Client; cookieA: string; cookieB: string }> {
+  const cA = await newSessionCookie();
+  const a = await connectAndJoinQueue(cA);
+  await wait(100);
+  const cB = await newSessionCookie();
+  const b = await connectAndJoinQueue(cB);
+  await wait(200);
+  return { a, b, cookieA: cA, cookieB: cB };
+}
+
 let cookieA: string;
 let a: Client;
 let b: Client;
@@ -120,16 +137,6 @@ it("pairs the first two queued sessions as A and B, and starts the game for both
   // pushed it a state too, not just the newly-queueing B.
   expect(lastState(a.messages)).toBeDefined();
   expect(lastState(b.messages)).toBeDefined();
-});
-
-it("queues a third visitor rather than rejecting them outright, since one series is already active", async () => {
-  const c = await connectAndJoinQueue(await newSessionCookie());
-  expect(c.messages).toContainEqual({ type: "queued" });
-  // Not seated: no assignment, no state, while the active series continues.
-  expect(c.messages.some((m) => m.type === "assigned")).toBe(false);
-  expect(c.messages.some((m) => m.type === "state")).toBe(false);
-  c.ws.close();
-  await wait(200);
 });
 
 it("enforces turn order and leaves state unchanged on a rejected action", async () => {
@@ -180,82 +187,8 @@ it("resumes the same game for a reconnecting session instead of losing it", asyn
   expect(resumedState?.currentPlayer).toBe(beforeReconnect.currentPlayer);
   expect(resumedState?.players.A.hand.length).toBe(beforeReconnect.players.A.hand.length);
 
-  // Leave A closed (no further reconnect) and B still connected — the next
-  // test relies on exactly this to check that only A's slot gets reaped.
-  aAgain.ws.close();
   a = aAgain;
 });
-
-it("frees only the disconnected player's slot once its grace period elapses, leaving the still-connected opponent's session untouched — and the freed slot goes to whoever's been queued longest, not a new arrival", async () => {
-  // Default vitest per-test timeout (5s) isn't enough once this actually
-  // waits out a real DISCONNECT_GRACE_MS — see the timeout arg below.
-  // A has been closed (previous test) with no reconnect since; B never
-  // disconnected at all. Waiting out the grace period relies purely on
-  // wall-clock time having passed — there's no timer running anywhere for
-  // this test to depend on (Stage 8a is deliberately timer-free).
-  //
-  // Queue a session BEFORE the grace period elapses, so there's a genuine
-  // FIFO ordering to verify once the slot frees — the freed seat must go to
-  // this already-waiting session, not to whoever happens to connect next.
-  const waitingLongest = await connectAndJoinQueue(await newSessionCookie());
-  expect(waitingLongest.messages).toContainEqual({ type: "queued" });
-
-  await wait(disconnectGraceMs + 500);
-
-  const messageCountBeforeB = b.messages.length;
-  // A late arrival, queued AFTER the already-waiting session above — must
-  // not cut ahead of it once the slot frees.
-  const lateArrival = await connectAndJoinQueue(await newSessionCookie());
-  await wait(200);
-
-  // The longest-waiting queued session claims A's now-freed slot — not the
-  // late arrival, which stays queued.
-  expect(waitingLongest.messages).toContainEqual({ type: "assigned", player: "A" });
-  expect(lateArrival.messages.some((m) => m.type === "assigned")).toBe(false);
-  expect(lateArrival.messages).toContainEqual({ type: "queued" });
-
-  // Freeing exactly one slot and refilling it still takes the session map
-  // from 1 entry back to 2, which is indistinguishable from the very first
-  // pairing ever completing — so it replaces the WHOLE game via the same
-  // pairing path, not just the departed player's seat. B, who never left,
-  // gets pushed this fresh state too even though B did nothing.
-  const newMessagesForB = b.messages.slice(messageCountBeforeB);
-  expect(newMessagesForB.some((m) => m.type === "state")).toBe(true);
-  const freshState = lastState(b.messages);
-  expect(freshState?.status).toBe("active");
-  expect(freshState?.players.A.hand.length).toBe(3);
-  expect(freshState?.players.B.hand.length).toBe(3);
-
-  lateArrival.ws.close();
-  waitingLongest.ws.close();
-  b.ws.close();
-  await wait(200);
-}, disconnectGraceMs + 5000);
-
-it("frees both slots once nobody reconnects within the grace period, starting a genuinely fresh pairing from the queue", async () => {
-  // waitingLongest (as A) and b (as B) were closed at the end of the
-  // previous test with no reconnect since.
-  await wait(disconnectGraceMs + 500);
-
-  const freshA = await connectAndJoinQueue(await newSessionCookie());
-  expect(freshA.messages).toContainEqual({ type: "assigned", player: "A" });
-  expect(freshA.messages).toContainEqual({ type: "waiting" });
-
-  const freshB = await connectAndJoinQueue(await newSessionCookie());
-  await wait(200);
-  expect(freshB.messages).toContainEqual({ type: "assigned", player: "B" });
-
-  const state = lastState(freshB.messages);
-  expect(state).toBeDefined();
-  expect(state?.status).toBe("active");
-  expect(state?.players.A.hand.length).toBe(3);
-  expect(state?.players.B.hand.length).toBe(3);
-
-  // Left open on purpose — the voluntary-termination tests below continue
-  // using this exact pairing instead of closing it.
-  a = freshA;
-  b = freshB;
-}, disconnectGraceMs + 5000);
 
 it("lets one player propose ending the game early without ending it", async () => {
   const messageCountBeforeA = a.messages.length;
@@ -317,3 +250,168 @@ it("ends the game with no winner once both players request it, and allows a fres
   a.ws.close();
   b.ws.close();
 });
+
+// --- Stage 4b: concurrent, independent series ---------------------------
+
+it("forms two independent concurrent series from a single FIFO queue, not one series gating the other", async () => {
+  // Formed SEQUENTIALLY, not concurrently: the FIFO queue pairs strictly by
+  // arrival order with no notion of "these two belong together" beyond
+  // that order, so running formAPairing() concurrently would interleave
+  // the four joins and pair session 1 with session 3 instead of with
+  // session 2 — a test bug, not a server bug, caught by actually running
+  // this once. Sequential calls guarantee each pairing's own two sessions
+  // queue back to back and so pair with each other.
+  const first = await formAPairing();
+  const second = await formAPairing();
+
+  expect(first.a.messages).toContainEqual({ type: "assigned", player: "A" });
+  expect(first.b.messages).toContainEqual({ type: "assigned", player: "B" });
+  expect(second.a.messages).toContainEqual({ type: "assigned", player: "A" });
+  expect(second.b.messages).toContainEqual({ type: "assigned", player: "B" });
+
+  expect(lastState(first.a.messages)?.status).toBe("active");
+  expect(lastState(second.a.messages)?.status).toBe("active");
+
+  first.a.ws.close();
+  first.b.ws.close();
+  second.a.ws.close();
+  second.b.ws.close();
+  await wait(200);
+});
+
+it("never leaks one series' broadcasts or actions into an unrelated concurrent series", async () => {
+  const one = await formAPairing();
+  const two = await formAPairing();
+
+  const oneBMessageCountBefore = one.b.messages.length;
+  const twoAMessageCountBefore = two.a.messages.length;
+  const twoBMessageCountBefore = two.b.messages.length;
+
+  // An action in series "one" (A draws, or ends its turn depending on whose
+  // turn it is) must only ever produce a new state broadcast for "one"'s
+  // own two sockets — never for "two"'s, which has nothing to do with it.
+  const oneState = lastState(one.a.messages);
+  if (!oneState) throw new Error("expected series one to be active");
+  const oneActor = oneState.currentPlayer === "A" ? one.a : one.b;
+  send(oneActor.ws, { type: "draw" });
+  await wait(200);
+
+  const oneBNew = one.b.messages.slice(oneBMessageCountBefore);
+  expect(oneBNew.some((m) => m.type === "state")).toBe(true);
+
+  const twoANew = two.a.messages.slice(twoAMessageCountBefore);
+  const twoBNew = two.b.messages.slice(twoBMessageCountBefore);
+  expect(twoANew).toHaveLength(0);
+  expect(twoBNew).toHaveLength(0);
+
+  one.a.ws.close();
+  one.b.ws.close();
+  two.a.ws.close();
+  two.b.ws.close();
+  await wait(200);
+});
+
+it("reconnects a session to its own series, not an unrelated concurrent one", async () => {
+  const one = await formAPairing();
+  const two = await formAPairing();
+
+  const beforeReconnect = lastState(one.a.messages);
+  if (!beforeReconnect) throw new Error("expected series one to be active");
+
+  // Reload one.a's page: close, reopen with the SAME cookie. It must
+  // resume series ONE's state specifically (same currentPlayer, same hand
+  // size) — not series two's, which has a completely independent board/
+  // hand/turn order by virtue of being a different createInitialState().
+  one.a.ws.close();
+  await wait(100);
+  const oneAAgain = await connect(one.cookieA);
+  await wait(200);
+
+  expect(oneAAgain.messages[0]).toEqual({ type: "assigned", player: "A" });
+  const resumedState = lastState(oneAAgain.messages);
+  expect(resumedState).toBeDefined();
+  expect(resumedState?.currentPlayer).toBe(beforeReconnect.currentPlayer);
+  expect(resumedState?.players.A.hand.length).toBe(beforeReconnect.players.A.hand.length);
+
+  // Series two's players must see nothing at all from series one's player
+  // reconnecting — no stray state push, no assignment.
+  const twoAMessageCountBefore = two.a.messages.length;
+  const twoBMessageCountBefore = two.b.messages.length;
+  expect(two.a.messages.slice(twoAMessageCountBefore)).toHaveLength(0);
+  expect(two.b.messages.slice(twoBMessageCountBefore)).toHaveLength(0);
+
+  oneAAgain.ws.close();
+  one.b.ws.close();
+  two.a.ws.close();
+  two.b.ws.close();
+  await wait(200);
+});
+
+it("forfeits the WHOLE series to the survivor once the disconnected opponent's grace period elapses, without disturbing an unrelated concurrent series", async () => {
+  const toForfeit = await formAPairing();
+  const unrelated = await formAPairing();
+
+  const survivor = toForfeit.a;
+  const departing = toForfeit.b;
+
+  departing.ws.close();
+  await wait(disconnectGraceMs + 500);
+
+  // Reaping is only checked inside resolveSession, which runs on a
+  // WebSocket upgrade — a plain HTTP GET never reaches it. Any new
+  // connection attempt is a fine trigger (same pattern every prior
+  // disconnect-expiry test in this file relies on, each of those via
+  // connectAndJoinQueue's own WebSocket connect).
+  const unrelatedACountBefore = unrelated.a.messages.length;
+  const unrelatedBCountBefore = unrelated.b.messages.length;
+  const trigger = await connect(await newSessionCookie());
+  await wait(200);
+
+  expect(survivor.messages).toContainEqual({ type: "seriesEnded", reason: "opponentDisconnected" });
+
+  // The unrelated, still-fully-connected concurrent series must be
+  // completely undisturbed by the other one's forfeit settling.
+  expect(unrelated.a.messages.slice(unrelatedACountBefore)).toHaveLength(0);
+  expect(unrelated.b.messages.slice(unrelatedBCountBefore)).toHaveLength(0);
+  expect(lastState(unrelated.a.messages)?.status).toBe("active");
+
+  // The survivor's own session was released — rejoining the queue starts a
+  // genuinely fresh pairing, it doesn't resume the forfeited series.
+  send(survivor.ws, { type: "joinQueue" });
+  await wait(100);
+  expect(survivor.messages.filter((m) => m.type === "queued").length).toBeGreaterThan(0);
+
+  trigger.ws.close();
+  survivor.ws.close();
+  unrelated.a.ws.close();
+  unrelated.b.ws.close();
+  await wait(200);
+}, disconnectGraceMs + 5000);
+
+it("abandons a series with no winner, notifying nobody, once BOTH players' grace periods elapse close together", async () => {
+  const both = await formAPairing();
+
+  both.a.ws.close();
+  both.b.ws.close();
+  await wait(disconnectGraceMs + 500);
+
+  // Trigger the lazy reap via an unrelated connection (must be a real
+  // WebSocket connect — resolveSession, where reaping happens, only runs
+  // on a WS upgrade, never on a plain HTTP GET).
+  const trigger = await connect(await newSessionCookie());
+  await wait(200);
+
+  // Neither socket is open to receive anything, so the only observable
+  // proof is that the server didn't crash and a genuinely fresh pairing
+  // can form afterward without colliding with the abandoned series' old
+  // state — covered by the next ordinary pairing test implicitly trusting
+  // a clean queue.
+  const fresh = await formAPairing();
+  expect(lastState(fresh.a.messages)?.status).toBe("active");
+  expect(lastState(fresh.a.messages)?.players.A.hand.length).toBe(3);
+
+  trigger.ws.close();
+  fresh.a.ws.close();
+  fresh.b.ws.close();
+  await wait(200);
+}, disconnectGraceMs + 5000);

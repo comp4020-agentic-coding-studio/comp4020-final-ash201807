@@ -11,6 +11,17 @@ export type ServerMessage =
   // unreachable and has been removed rather than left as dead protocol.
   | { type: "queued" }
   | { type: "state"; state: GameState }
+  // Stage 4b: a seated session's series ended by forfeit rather than by
+  // ordinary play — sent only to the survivor (the opponent whose grace
+  // period expired is, by definition, not connected to receive anything).
+  // Deliberately distinct from GameState's own "finished"/"locked"/
+  // "abandoned" statuses: a forfeit is a server-level settlement, not a
+  // game-rules outcome, so it's never written into the GameState itself
+  // (per PROCESS.md's Stage 9 guiding principle — match/series lifecycle
+  // stays out of engine.ts). The survivor's own SessionEntry is released
+  // the moment this is sent, so they must explicitly re-queue afterward,
+  // same as after any other ended series.
+  | { type: "seriesEnded"; reason: "opponentDisconnected" }
   | { type: "error"; message: string };
 
 export type ClientMessage =

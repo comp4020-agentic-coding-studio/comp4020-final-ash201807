@@ -578,6 +578,120 @@ the message handler/`currentGame` still resolve against that one global
 reference rather than a per-session lookup into a keyed collection. None of
 Stage 4's actual product goal (concurrent series) is enabled yet.
 
+## Stage 4b — concurrent series, forfeit replaces Stage 3's seat-refill
+
+A second read-only design review (this conversation), scoped specifically to
+4b, surfaced a real conflict while implementing it — not a hypothetical risk,
+a structural one found by actually tracing the algorithm: Stage 3's existing
+model (a lone queued session silently refills ONE freed seat, replacing the
+whole series underneath the still-connected survivor with no consent — a
+known limitation already recorded under Stage 8a) cannot be generalized to N
+concurrent series without either (a) a stranger's unrelated `joinQueue`
+sometimes getting incorrectly paired into a half-finished series instead of
+starting its own, or (b) keeping a global "pause all new pairings while any
+grace period is pending anywhere" rule that would make one unrelated
+match's disconnect stall matchmaking for everyone else. Both were traced
+through concretely, not just asserted; neither is acceptable. The project
+owner's decision: adopt the forfeit model instead — a seated session whose
+grace period expires forfeits its *entire* series to the opponent, rather
+than having its lone seat quietly refilled. This replaces Stage 3's
+refill-one-seat behaviour outright (confirmed as a deliberate, final
+decision, not a temporary stopgap): the existing "frees only the
+disconnected player's slot, refilling it from the queue" `spec/game.test.ts`
+test was rewritten rather than kept, since its entire premise (a stranger
+takes over a vacant seat) no longer exists.
+
+This also simplified the implementation: because every series now either
+has both its players or is being settled (forfeited or abandoned), a series
+is never "half-seated, waiting for one more." `pumpQueue()` went back to
+pairing two sessions at a time (`dequeuePair`, not Stage 3/4a's one-at-a-time
+`dequeueOne`), looping with no ceiling — as many pairs as the queue allows
+in one call, confirmed by manual testing: 5 waiting sessions produce exactly
+2 independent series plus 1 still queued, in one `joinQueue` call. The
+one-at-a-time functions this replaced (`dequeueOne`, `seatOne`,
+`nextOpenSeat`, `bindActiveSeries`) were all Stage 3/4a infrastructure for
+the now-abandoned refill model and were removed rather than left unused —
+replaced by `dequeuePair` (two at once, atomic) and `seatPair` (creates both
+`SessionEntry`s with their shared `seriesId` set from the start, since under
+this model there's no longer an intermediate "seated, no series yet" state
+at all).
+
+`AppState.series: SeriesState | null` (`persistence.ts`) became
+`seriesList: Record<string, SeriesState>`, keyed by `seriesId` — any number
+of independent series, each addressed by the id already present on every
+`SessionEntry` since Stage 2. `broadcastState(seriesId)` (already taking an
+explicit `seriesId` since Stage 4a) now looks it up in `seriesList` instead
+of comparing against one global reference; the message handler resolves
+`game`/`seriesId` via the acting session's own `SessionEntry.seriesId`
+rather than one shared field, at every site that previously read
+`appState.series` directly.
+
+New server-level settlement function, `reapAndSettleSeries` (replacing
+Stage 3/4a's `reapAndFreeSeries`): after reaping, groups the sessions that
+were just reaped by which series they belonged to, and for each affected
+series checks how many of its two sessions remain — two (an unrelated
+session in that series merely reconnected or was never at risk, nothing to
+do), one (forfeit: the survivor is sent a new `seriesEnded` message
+— deliberately NOT written into `GameState` itself, since a forfeit is a
+server-level settlement, not a game-rules outcome, per this repo's own
+guiding principle that match/series lifecycle stays out of `engine.ts` —
+and their own `SessionEntry` is released so they must explicitly re-queue,
+same as after any ordinary ended match), or zero (both players' grace
+periods expired, however close together — this whole pass runs as one
+synchronous scan over a single `reapExpiredSessions()` call, so "close
+together" can never actually race: abandoned, no winner, nobody left to
+notify, per the project owner's own closed decision for this exact case in
+Stage 9's entry above). Either way the series is deleted from `seriesList`
+— settling it twice is structurally impossible, since the second time
+there's nothing left in that series for `sessionsInSeries` to find.
+
+New protocol: `ServerMessage` gained `{ type: "seriesEnded", reason:
+"opponentDisconnected" }`; the debug client (`client/app.js`) now handles it
+by clearing its board/hand display and re-showing the "Join queue" button
+with an explanation, rather than being left rendering a stale board forever.
+
+Verified by running the result, not reading code back: `pnpm typecheck`,
+`pnpm test:engine`/`sessions.test.ts`/new `persistence.test.ts` (93 tests),
+and the full `pnpm check` black-box suite (15 tests: the 13 carried over
+from Stage 3 minus the two whose premise this stage replaced, plus 4 new
+ones — two independent concurrent series forming from one queue; actions in
+one never leaking into another's messages; a reconnect resuming its own
+series specifically, not a concurrent unrelated one; and the forfeit/
+abandonment cases, each confirmed not to disturb an unrelated concurrent
+series running at the same time) all pass against a real locally running
+server on a fresh database. The first attempt at the two-concurrent-series
+test itself had a bug (forming both pairings via `Promise.all` interleaved
+their joins and paired session 1 with session 3 instead of with session
+2) — a test bug, not a server bug, caught by actually running it once
+rather than assumed correct from reading the code; fixed by forming them
+sequentially, since the FIFO queue has no notion of "these two belong
+together" beyond arrival order. Manually verified over real WebSocket
+connections, independent of the automated suite: 5 simultaneously queued
+sessions produce exactly 2 concurrent series (sessions 1-2 and 3-4) with
+the 5th still queued, confirmed by inspecting server responses directly —
+matching the Stage 4b design review's own traced algorithm exactly.
+
+`README.md`'s "What good means here" point 4 and "Checked in spec/"
+paragraph were updated to describe concurrent matches and the forfeit rule,
+replacing the now-inaccurate "exactly one match active"/"refill a freed
+seat" claims.
+
+**Known limitation, unchanged from the prior review's own finding:**
+`CLAUDE.md` is still stale (confirmed again against this stage's own
+shipped behaviour) — deferred to Stage 4c/4d, not fixed here, per the
+already-agreed split.
+
+**Not touched, confirmed:** `src/game/engine.ts`, `src/game/types.ts`
+(zero rule changes — reconfirmed); production database (no clear, no
+migration — a third incompatible schema change now stacked on the same
+not-yet-authorized list: `game`→`series`, `+queue`, `series`→`seriesList`);
+no `git push`, no deploy.
+
+**What Stage 4b does not cover:** the never-before-tested scenario of a
+server restart with 2+ concurrent in-progress series live — still Stage
+4c's job specifically, not attempted here; `CLAUDE.md`'s stale wording
+(still Stage 4d).
+
 ## Not yet built
 
 The real client UI — the current one is a bare, unstyled debug page — and
@@ -585,16 +699,8 @@ the Expansion/Board-Locked/New-Game/voluntary-termination surfaced in it;
 `quitRequested` specifically has no UI at all yet. The lobby/join-queue
 step added in Stage 3 is likewise bare — a single unstyled button.
 
-Stage 9's decision is mostly still design-only; Stages 2, 3, and 4a above
-are the implemented slices so far. Still not implemented:
-- **Stage 4b** — true concurrency itself: `appState.series` becoming a
-  keyed `Record<seriesId, SeriesState>`, `pumpQueue()` draining pairs with
-  no ceiling instead of one session at a time, the message handler
-  resolving `game` per-session instead of via one global reference. The
-  review named this the highest-risk sub-stage (a broadcast-isolation bug
-  here means one match's private state leaking to an unrelated player) and
-  it needs its own cross-series-isolation tests before being considered
-  done, not just a happy-path two-series check.
+Stage 9's decision is mostly still design-only; Stages 2, 3, 4a, and 4b
+above are the implemented slices so far. Still not implemented:
 - **Stage 4c** — verification-only: actually killing and restarting the
   server process with 2+ concurrent in-progress series live, confirming
   each is restored correctly and none bleed into each other. Never tested
@@ -602,27 +708,31 @@ are the implemented slices so far. Still not implemented:
   habit (Stage 8a's single-series version of this exact check).
 - **Stage 4d** — fixing `CLAUDE.md`'s stale "one shared game, third visitor
   rejected" section (confirmed contradicted by Stage 3's own already-
-  shipped behaviour) and cross-checking `README.md`/`PROCESS.md` against
-  whatever Stage 4b actually ships, once it's stable enough to describe
-  accurately — deliberately deferred rather than updated piecemeal per-
-  sub-stage.
+  shipped behaviour, and again by Stage 4b's) and cross-checking it against
+  what's actually shipped — deliberately deferred rather than updated
+  piecemeal per-sub-stage.
 - Best-of-three score tracking and the next-game-in-series handoff —
   confirmed orthogonal to Stage 4's own `seriesList` keying (a series' own
   `games: GameState[]` already supports more than one entry structurally),
   not blocked by anything above.
-- The per-series generalization of Stage 8a's disconnect-grace mechanism
-  (still global/single-series today — Stage 4b's own scope), plus the new
-  series-forfeit and single-sided-quit actions Stage 9 agreed to.
-- The "continue this game vs. start a new game" redesign — Stage 3
-  deliberately preserved rather than fixed the known freed-seat-replaces-
-  whole-series limitation; see above.
+- The single-sided voluntary-quit action Stage 9 agreed to (immediately
+  awarding the series to the opponent, as distinct from the existing mutual
+  `requestQuit`/`rejectQuit`) — Stage 4b's forfeit-on-expiry settles the
+  *disconnection* case specifically; an explicit "I quit, you win" action
+  while both players are still connected is a different, not-yet-built
+  primitive.
+- The "continue this game vs. start a new game" redesign named back in
+  Stage 8a — moot now that Stage 4b replaced the seat-refill model it was
+  designed to gate: there is no freed seat to offer a choice about anymore,
+  a vacated seat means the whole series already forfeited. Recorded here as
+  superseded, not implemented.
 - Clearing the live deployment's old-shape persisted game (`game`/no
-  `queue` field, pre-Stage-2/3, soon also no `seriesList` once 4b lands) —
-  not yet authorized or done.
+  `queue` field, pre-Stage-2/3; `series`/no keying, pre-Stage-4b) — not yet
+  authorized or done.
 
 Each further step gets its own explicit go-ahead before code changes, per
-this repo's own `CLAUDE.md` — Stages 2, 3, and 4a above were each reviewed
-read-only first, then implemented only once separately authorized, and the
-same applies to deploying any of them.
+this repo's own `CLAUDE.md` — Stages 2, 3, 4a, and 4b above were each
+reviewed read-only first, then implemented only once separately authorized,
+and the same applies to deploying any of them.
 
 This file is rewritten, not appended to, each time.

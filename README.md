@@ -46,30 +46,36 @@ Given that, good means:
    Combo just did — an engine that's correct but unreadable isn't good by
    this app's own standard, even with every `spec/` check green.
 
-4. **It stays small on purpose.** No accounts, leaderboard, or chat. Exactly
-   one match is active at a time; a third-or-later visitor explicitly joins a
-   FIFO queue rather than being rejected outright or given a lesser
-   spectator role — this is deliberate matchmaking for a small group of
-   friends taking turns, not a feature aimed at a larger audience than this
-   is built for.
+4. **It stays small on purpose.** No accounts, leaderboard, or chat. Any
+   number of two-player matches can run at once, each independent of the
+   others — but matchmaking itself is still deliberately simple: an explicit
+   FIFO queue pairs the two longest-waiting players, no skill rating, no
+   choice of opponent, no spectator role. This is matchmaking sized for a
+   small group of friends taking turns, not a feature aimed at a larger
+   audience than this is built for.
 
 ## Checked vs. judged
 
 Checked in `spec/`, against the real running app: a session must explicitly
 join the matchmaking queue before it's seated — merely connecting claims
-nothing; a third-or-later visitor joins that queue rather than being
-rejected, and stays queued for as long as the one active match continues;
-an out-of-turn action, and confirming a new game mid-match, are rejected
-and change nothing; reconnecting with the same session resumes the game
-rather than losing it; a session that disconnects and never comes back has
-its slot freed once its grace period elapses — surviving an actual process
-restart mid-grace-period, not just elapsed time in one long-lived process,
-and the freed slot goes to whoever's been queued longest, not whoever
-happens to connect next — while a session that's still connected is left
-alone; a session that disconnects while still only queued (never seated) is
-removed from the queue outright, no grace period; and voluntarily ending an
-active game, including the other player rejecting that request, works
-end-to-end over the real transport. Checked in
+nothing; the FIFO queue pairs the two longest-waiting sessions into their
+own independent match the moment a second one arrives, with no ceiling on
+how many matches run concurrently; one match's state, actions, and errors
+never reach another match's players, and a reconnecting session always
+resumes its own match specifically, never an unrelated concurrent one; an
+out-of-turn action, and confirming a new game mid-match, are rejected and
+change nothing; reconnecting with the same session resumes the game rather
+than losing it; a session that disconnects and never comes back forfeits
+its *entire match* to the opponent once its grace period elapses —
+surviving an actual process restart mid-grace-period, not just elapsed time
+in one long-lived process — without disturbing any other match running at
+the same time, while a session that's still connected is left alone; if
+both players of a match disconnect and neither returns, that match is
+abandoned with no winner, silently, rather than counted as anyone's win; a
+session that disconnects while still only queued (never seated) is removed
+from the queue outright, no grace period; and voluntarily ending an active
+game, including the other player rejecting that request, works end-to-end
+over the real transport. Checked in
 `src/game/engine.test.ts`, against the rules engine directly: AP costs, every
 Combo direction and type combination, damage and effect stacking (including
 Fire's own extra-damage effect, and its own lethal check separate from the
