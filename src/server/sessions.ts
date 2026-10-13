@@ -2,12 +2,12 @@ import type { PlayerId } from "../game/types.ts";
 
 export interface SessionEntry {
   player: PlayerId;
-  // Which series (Stage 9/2) this session is bound to. Null while a session
-  // has joined but is still alone, waiting for a second player — there's no
-  // series to bind to until bindSessionsToSeries runs, which only happens
-  // once a pair completes. Stage 2 keeps exactly one series alive at a time;
-  // this field exists so a session resolves to "which series" rather than
-  // that being an unstated singleton assumption.
+  // Which series this session is bound to. Always non-null once an entry
+  // exists at all — under Stage 3's queue model, a SessionEntry is only ever
+  // created by seatPlayers() at the exact moment a pairing completes, so
+  // there's no longer an intermediate "has a seat but no series yet" state
+  // the way there briefly was in Stage 2. Kept nullable in the type purely
+  // for normalizeSessions' pre-Stage-2 upgrade path below.
   seriesId: string | null;
   // epoch ms when this session's last socket closed with no replacement
   // connected since; null while a live connection is on file. Read only as a
@@ -21,42 +21,67 @@ export interface SessionEntry {
 
 export type SessionMap = Partial<Record<string, SessionEntry>>;
 
-export type JoinResult =
-  | { kind: "joined"; player: PlayerId; sessions: SessionMap; justCompletedPair: boolean }
-  | { kind: "full" };
+// Stage 3: a session that hasn't been seated yet (no SessionEntry) waits in
+// a plain FIFO array of session ids — "queued" needs no richer state than
+// "present in this list", since nothing about a queued session is known yet
+// beyond its identity. Seating (seatPlayers, below) is the one and only
+// transition out of the queue into a SessionEntry.
 
-// Pure assignment logic, no I/O: the first two distinct session ids become
-// Player A and Player B, in whichever order they arrive. A session id
-// already assigned gets its existing slot back (a reload or reconnect) and
-// has its disconnect mark cleared. Any third (or later) distinct session id
-// is rejected outright — no spectating, per explicit instruction.
-//
-// `seriesId` starts null even for the completing half of a pair — joining
-// only assigns a seat, it doesn't know the series id the caller is about to
-// generate for it. The caller binds both sessions to that id afterward, via
-// bindActiveSeries, once justCompletedPair is true (see server.ts).
-export function joinSession(sessions: SessionMap, sessionId: string): JoinResult {
-  const existing = sessions[sessionId];
-  if (existing) {
-    const resumed: SessionMap =
-      existing.disconnectedAt === null ? sessions : { ...sessions, [sessionId]: { ...existing, disconnectedAt: null } };
-    return { kind: "joined", player: existing.player, sessions: resumed, justCompletedPair: false };
-  }
-
-  if (Object.keys(sessions).length >= 2) {
-    return { kind: "full" };
-  }
-
-  const taken = new Set(Object.values(sessions).map((entry) => entry!.player));
-  const player: PlayerId = taken.has("A") ? "B" : "A";
-  const next: SessionMap = { ...sessions, [sessionId]: { player, seriesId: null, disconnectedAt: null } };
-  return { kind: "joined", player, sessions: next, justCompletedPair: Object.keys(next).length === 2 };
+// Pure: appends sessionId to the back of the queue unless it's already
+// present. Re-requesting to join while already queued is a no-op, not a
+// duplicate entry — Stage 9's uniqueness rule ("at most one active queue
+// slot or active series at a time") depends on this holding even if a
+// client sends joinQueue twice.
+export function enqueue(queue: string[], sessionId: string): string[] {
+  if (queue.includes(sessionId)) return queue;
+  return [...queue, sessionId];
 }
 
-// Stage 2 only ever has one series alive at a time, so completing a pair
-// means both sessions in the map belong to it — this just stamps the
-// server-generated seriesId onto every entry, rather than engine.ts or
-// joinSession needing to know how ids are generated.
+// Pure: removes sessionId from the queue if present, a no-op (same array
+// reference) otherwise. Used for the queued-disconnect rule (Stage 9): a
+// session that disconnects while merely queued is dropped outright, no
+// grace period — it never held a seat with state at stake.
+export function removeFromQueue(queue: string[], sessionId: string): string[] {
+  if (!queue.includes(sessionId)) return queue;
+  return queue.filter((id) => id !== sessionId);
+}
+
+// Pure: dequeues the single front (longest-waiting) session id, if any —
+// the atomic unit Stage 3's seating loop operates on. One at a time, not
+// two, so that a lone queued session can take over a seat vacated by a
+// disconnected-and-reaped player while the OTHER, still-connected player
+// keeps theirs (see server.ts's pumpQueue) — matching Stage 8a's original
+// one-arrival-at-a-time granularity, now sourced from the queue instead of
+// directly from a new connection.
+export function dequeueOne(queue: string[]): { sessionId: string; rest: string[] } | null {
+  if (queue.length === 0) return null;
+  const [sessionId, ...rest] = queue;
+  return { sessionId, rest };
+}
+
+// Pure: which of the two player identities isn't already held by an entry
+// in `sessions` — mirrors the pre-Stage-3 joinSession's own `taken` logic
+// exactly, just factored out so pumpQueue can call it once per seating
+// step rather than it being buried inside a single two-argument function.
+export function nextOpenSeat(sessions: SessionMap): PlayerId {
+  const taken = new Set(Object.values(sessions).map((entry) => entry!.player));
+  return taken.has("A") ? "B" : "A";
+}
+
+// Pure: seats a single freshly-dequeued session id as the given player,
+// with no series bound yet (null) — set once a second session completes
+// the pair, via bindActiveSeries below. This is the only way a SessionEntry
+// is created under Stage 3's model; callers must only pass ids that came
+// from dequeueOne (and so, by construction, held no SessionEntry yet).
+export function seatOne(sessions: SessionMap, sessionId: string, player: PlayerId): SessionMap {
+  return { ...sessions, [sessionId]: { player, seriesId: null, disconnectedAt: null } };
+}
+
+// Stamps the given seriesId onto every entry currently in `sessions` — used
+// the instant a second session's seating brings the count to two, so both
+// the newly-seated arrival AND any already-seated survivor (whose own
+// seriesId was from whatever series just ended) end up bound to the same
+// fresh one.
 export function bindActiveSeries(sessions: SessionMap, seriesId: string): SessionMap {
   const next: SessionMap = {};
   for (const [id, entry] of Object.entries(sessions)) {
@@ -69,7 +94,9 @@ export function bindActiveSeries(sessions: SessionMap, seriesId: string): Sessio
 // Marks a known session's socket as closed, starting its grace period. A
 // no-op for an unknown sessionId — nothing to mark. Call again on a later
 // close (e.g. a reconnect that itself disconnects again); the new timestamp
-// simply replaces the old one.
+// simply replaces the old one. Only meaningful for a SEATED session — a
+// merely queued one is removed outright by removeFromQueue instead (see
+// server.ts's close handler for the branch between the two).
 export function markDisconnected(sessions: SessionMap, sessionId: string, now: number): SessionMap {
   const existing = sessions[sessionId];
   if (!existing) return sessions;
@@ -80,7 +107,7 @@ export function markDisconnected(sessions: SessionMap, sessionId: string, now: n
 // plain wall-clock comparison, not a scheduled callback, so it gives the
 // right answer whether it runs 10ms or 10 hours after the disconnect. The
 // caller (server.ts) is responsible for noticing when this empties the map
-// entirely and clearing the game that went with it.
+// entirely and clearing the series that went with it.
 export function reapExpiredSessions(sessions: SessionMap, now: number, graceMs: number): SessionMap {
   const next: SessionMap = {};
   for (const [id, entry] of Object.entries(sessions)) {
@@ -116,4 +143,13 @@ export function normalizeSessions(value: unknown): SessionMap {
     }
   }
   return next;
+}
+
+// Pre-Stage-3 persisted AppState has no `queue` field at all — reads as
+// undefined, not an empty array. Same "safe default" reasoning as the
+// SessionEntry upgrades above: treat it as nobody queued, never crash on
+// array operations against undefined.
+export function normalizeQueue(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((id): id is string => typeof id === "string");
 }

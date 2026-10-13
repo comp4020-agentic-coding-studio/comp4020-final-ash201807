@@ -410,28 +410,138 @@ function — but clearing it is exactly the kind of touch to `/data/game.db`
 this repo's `CLAUDE.md` requires an explicit go-ahead for, so it hasn't been
 done and isn't implied by this stage landing in git.
 
+## Stage 3 — a real FIFO matchmaking queue, still one series at a time
+
+A read-only design review (this conversation) preceded this stage, same
+discipline as Stage 2. It surfaced two product questions answered directly
+by the project owner rather than assumed: (1) "explicitly join the queue"
+means a real lobby step — connecting no longer claims anything by itself,
+a player must send a distinct action; (2) a queued-but-not-yet-matched
+player's client must see a message distinguishable from the existing
+`waiting` (seated, opponent not here yet) — so a new `queued` message was
+added rather than reusing `waiting`.
+
+`AppState` (`persistence.ts`) gained `queue: string[]` — session ids waiting
+to be matched, FIFO (push to the back, dequeue from the front). `sessions.ts`
+was restructured: the old `joinSession` (which both decided "is a seat
+free" and created the `SessionEntry` in one step) is gone, replaced by five
+small pure functions — `enqueue`/`removeFromQueue` (queue membership, each a
+no-op when there's nothing to change), `dequeueOne` (pops the single
+longest-waiting id), `nextOpenSeat` (which of A/B isn't currently held,
+same logic the old `joinSession` had, just factored out), `seatOne` (creates
+a `SessionEntry` with no series yet), and `bindActiveSeries` (stamps a fresh
+`seriesId` onto every currently-seated entry once a pair completes) —
+24 new/updated unit tests cover these directly, no server needed.
+
+`protocol.ts` gained two new message types: `ClientMessage`'s `joinQueue`
+(the explicit "I want to play" action — the one thing that now creates
+anything) and `ServerMessage`'s `queued`. The old `full` message was
+removed outright rather than left as dead protocol: nothing can produce it
+anymore, since a third-or-later visitor now queues instead of being
+rejected.
+
+`server.ts`'s central new function is `pumpQueue()` — seats one queued
+session at a time (not a pair plucked together) into whichever seat is
+open, exactly matching the granularity the pre-Stage-3 `joinSession` always
+had. This was a deliberate correctness fix mid-implementation: an earlier
+draft dequeued two at once, which would have silently broken Stage 8a's
+already-documented disconnect-recovery behaviour (a single freed seat,
+while the OTHER player is still connected, must still be refillable by the
+next queued session alone — not only when two happen to be queued
+together). `pumpQueue` only treats a seating as "a pair completed" when
+*this call's own dequeuing* brought the seated count to exactly two — not
+merely because it was already two before the call started — so an
+unrelated `joinQueue` from a third visitor, while a match is already in
+progress, can never retrigger series creation. This preserves Stage 8a's
+known limitation exactly as before: refilling one freed seat still starts
+a brand new series, replacing the still-connected survivor's whole match
+too — fixing that is the separately-tracked "continue vs. new game"
+redesign, not this stage.
+
+`pumpQueue()` and the existing disconnect-reaping are called from the same
+two trigger points reaping already used — a new connection's resolution,
+and a `joinQueue` message — consistent with Stage 8a's own established
+reasoning that lazy, request-triggered checks are correct here (a scheduled
+timer wouldn't survive Fly auto-stopping the machine between requests
+anyway, and nothing about the queue's contents or an open-seat count can
+change except through a request). The close handler now branches: a
+session still only in the queue is removed outright, no grace period
+(Stage 9's own rule — it never held a seat with state at stake); a seated
+session keeps the existing Stage 8a grace-period mechanism unchanged.
+
+Deliberately **not** done, per explicit instruction: Stage 4's concurrency
+(multiple series at once), best-of-three scoring, and anything to
+`engine.ts` — confirmed unchanged, same guiding principle as every stage
+since 9.
+
+Verified by running the result, not reading code back: `pnpm typecheck`,
+`pnpm test:engine` (87 tests, up from Stage 2's 79), and `pnpm check`'s
+black-box suite (13 tests, up from 12 — one new test added for "requires
+joinQueue before a seat is assigned") all pass against a real locally
+running server on a fresh database. Manually exercised over real
+WebSocket connections, independent of the automated suite: two sessions
+pairing and starting a match while two more simply queue behind them
+without disturbing the active match; a session that disconnects while only
+queued (never seated) is removed from the persisted `queue` array
+immediately, confirmed by reading the SQLite row directly — not after any
+grace period, exactly as required. `spec/game.test.ts`'s "rejects a third
+visitor outright" test — flagged as needing rewriting all the way back in
+Stage 9's own "Consequences" section — was rewritten to assert the new
+queueing behaviour instead of deleted; its disconnect-reaping test was
+extended (not just updated) to also assert the FIFO-fairness guarantee: a
+session queued before the slot frees claims it, not a later arrival.
+`README.md`'s "What good means here" point 4 and its "Checked in spec/"
+paragraph were updated to describe this actual behaviour, since both
+previously asserted the now-superseded "third visitor rejected outright"
+claim.
+
+**Known limitation carried forward unchanged, not introduced by this
+stage:** as described above, refilling one freed seat still replaces the
+whole series rather than preserving the still-connected survivor's match —
+this is Stage 8a's own already-documented gap, not a new one; Stage 3
+deliberately preserves it rather than fixing it, since the fix is a
+separate, not-yet-authorized redesign.
+
+**What Stage 3 alone does not yet deliver:** "the server pairs the two
+longest-waiting eligible players" only in the sense of "whenever a seat is
+actually open" — because exactly one series can exist at a time in this
+stage's scope, a queue of 3+ simply waits, however long the active series
+takes, until it ends. This is the correct and complete form of the rule
+only once Stage 4 makes "a slot" mean "any of N concurrent series" rather
+than "the one series slot" — not a gap in this stage, just not yet the full
+picture by itself.
+
+**Not touched, confirmed:** production database (no clear, no migration —
+Stage 2's own already-identified compatibility gap is unchanged, now with
+one more incompatible field, `queue`, added to the same not-yet-authorized
+list); no `git push`, no deploy.
+
 ## Not yet built
 
 The real client UI — the current one is a bare, unstyled debug page — and
 the Expansion/Board-Locked/New-Game/voluntary-termination surfaced in it;
-`quitRequested` specifically has no UI at all yet.
+`quitRequested` specifically has no UI at all yet. The lobby/join-queue
+step added in Stage 3 is likewise bare — a single unstyled button.
 
-Stage 9's decision is mostly still design-only; Stage 2 above is the first
-implemented slice. Still not implemented:
-- The FIFO queue itself and match allocation off it (today's pairing is
-  still "first two sessions ever," not a queue).
+Stage 9's decision is mostly still design-only; Stages 2 and 3 above are
+the implemented slices so far. Still not implemented:
 - True concurrency — multiple series existing and being broadcast to at
   once (`sockets`/`broadcastState` still assume exactly one active series,
-  via the new `currentGame` accessor).
+  via the `currentGame` accessor). Stage 3's queue is correct but still
+  bottlenecked to one active series until this lands.
 - Best-of-three score tracking and the next-game-in-series handoff.
-- The per-series generalization of Stage 8a's disconnect-grace mechanism,
-  plus the new series-forfeit and single-sided-quit actions.
-- Clearing the live deployment's old-shape persisted game (see Stage 2's
-  own "known compatibility gap" above) — not yet authorized or done.
+- The per-series generalization of Stage 8a's disconnect-grace mechanism
+  (still global/single-series today), plus the new series-forfeit and
+  single-sided-quit actions Stage 9 agreed to.
+- The "continue this game vs. start a new game" redesign — Stage 3
+  deliberately preserved rather than fixed the known freed-seat-replaces-
+  whole-series limitation; see above.
+- Clearing the live deployment's old-shape persisted game (`game`/no
+  `queue` field, pre-Stage-2/3) — not yet authorized or done.
 
 Each further step gets its own explicit go-ahead before code changes, per
-this repo's own `CLAUDE.md` — Stage 2 above was reviewed read-only first,
-then implemented only once authorized, and the same applies to deploying
-it.
+this repo's own `CLAUDE.md` — Stages 2 and 3 above were each reviewed
+read-only first, then implemented only once separately authorized, and the
+same applies to deploying either.
 
 This file is rewritten, not appended to, each time.

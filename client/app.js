@@ -5,6 +5,7 @@ let myPlayer = null;
 let lastState = null;
 
 const statusEl = document.getElementById("status");
+const joinQueueBtn = document.getElementById("joinqueue-btn");
 const boardEl = document.getElementById("board");
 const handEl = document.getElementById("hand");
 const logEl = document.getElementById("log");
@@ -16,7 +17,10 @@ function log(message) {
 const protocol = location.protocol === "https:" ? "wss:" : "ws:";
 const ws = new WebSocket(`${protocol}//${location.host}/ws`);
 
-ws.addEventListener("open", () => log("[ws] connected"));
+ws.addEventListener("open", () => {
+  log("[ws] connected");
+  statusEl.textContent = "Connected. Click \"Join queue\" to find a match.";
+});
 ws.addEventListener("close", () => log("[ws] disconnected"));
 ws.addEventListener("error", () => log("[ws] error"));
 
@@ -25,10 +29,12 @@ ws.addEventListener("message", (event) => {
 
   if (message.type === "assigned") {
     myPlayer = message.player;
+    joinQueueBtn.style.display = "none";
   } else if (message.type === "waiting") {
     statusEl.textContent = `You are Player ${myPlayer}. Waiting for the second player to join...`;
-  } else if (message.type === "full") {
-    statusEl.textContent = "Game is full.";
+  } else if (message.type === "queued") {
+    joinQueueBtn.style.display = "none";
+    statusEl.textContent = "In queue — waiting for a match...";
     boardEl.textContent = "";
     handEl.textContent = "";
   } else if (message.type === "state") {
@@ -97,6 +103,7 @@ function render(state) {
   statusEl.textContent = text;
 }
 
+joinQueueBtn.addEventListener("click", () => send({ type: "joinQueue" }));
 document.getElementById("draw-btn").addEventListener("click", () => send({ type: "draw" }));
 document.getElementById("endturn-btn").addEventListener("click", () => send({ type: "endTurn" }));
 document.getElementById("newgame-btn").addEventListener("click", () => send({ type: "confirmNewGame" }));

@@ -46,22 +46,30 @@ Given that, good means:
    Combo just did — an engine that's correct but unreadable isn't good by
    this app's own standard, even with every `spec/` check green.
 
-4. **It stays small on purpose.** No accounts, matchmaking, leaderboard, or
-   chat. One game exists at a time; a third visitor is turned away, not given
-   a lesser spectator role — any of that would serve a bigger audience than
-   this is built for.
+4. **It stays small on purpose.** No accounts, leaderboard, or chat. Exactly
+   one match is active at a time; a third-or-later visitor explicitly joins a
+   FIFO queue rather than being rejected outright or given a lesser
+   spectator role — this is deliberate matchmaking for a small group of
+   friends taking turns, not a feature aimed at a larger audience than this
+   is built for.
 
 ## Checked vs. judged
 
-Checked in `spec/`, against the real running app: a third visitor is told the
-game is full; an out-of-turn action, and confirming a new game mid-match, are
-rejected and change nothing; reconnecting with the same session resumes the
-game rather than losing it; a session that disconnects and never comes back
-has its slot freed once its grace period elapses — surviving an actual
-process restart mid-grace-period, not just elapsed time in one long-lived
-process — while a session that's still connected is left alone; and
-voluntarily ending an active game, including the other player rejecting that
-request, works end-to-end over the real transport. Checked in
+Checked in `spec/`, against the real running app: a session must explicitly
+join the matchmaking queue before it's seated — merely connecting claims
+nothing; a third-or-later visitor joins that queue rather than being
+rejected, and stays queued for as long as the one active match continues;
+an out-of-turn action, and confirming a new game mid-match, are rejected
+and change nothing; reconnecting with the same session resumes the game
+rather than losing it; a session that disconnects and never comes back has
+its slot freed once its grace period elapses — surviving an actual process
+restart mid-grace-period, not just elapsed time in one long-lived process,
+and the freed slot goes to whoever's been queued longest, not whoever
+happens to connect next — while a session that's still connected is left
+alone; a session that disconnects while still only queued (never seated) is
+removed from the queue outright, no grace period; and voluntarily ending an
+active game, including the other player rejecting that request, works
+end-to-end over the real transport. Checked in
 `src/game/engine.test.ts`, against the rules engine directly: AP costs, every
 Combo direction and type combination, damage and effect stacking (including
 Fire's own extra-damage effect, and its own lethal check separate from the

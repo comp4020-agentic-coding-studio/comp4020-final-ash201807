@@ -4,21 +4,25 @@ import WebSocket from "ws";
 // Black-box checks against the RUNNING app's real HTTP + WebSocket surface
 // (see global-setup.ts) — no mocking, no reaching into the engine directly.
 // These exercise the claims README.md makes under "Checked in spec/": a
-// third visitor is rejected, an out-of-turn action changes nothing, and
-// reconnecting with the same session resumes rather than loses the game.
+// joinQueue is required before a seat is assigned, a third-and-later
+// visitor queues rather than being rejected, an out-of-turn action changes
+// nothing, and reconnecting with the same session resumes rather than
+// loses the match.
 //
-// This app is a single shared game (no rooms), so every `it` below shares
-// ONE pairing established once in beforeAll and runs in declaration order —
-// unusual for tests, but unavoidable here: a second, independent pairing
-// attempt in the same run would just see the game already full.
+// This app runs exactly one active series at a time (Stage 3: a real FIFO
+// queue feeds it, but concurrency is a later stage) — every `it` below
+// shares ONE pairing established once in beforeAll and runs in declaration
+// order, unusual for tests, but unavoidable here: a second, independent
+// pairing attempt in the same run would just queue behind the first.
 //
-// IMPORTANT for local runs: running this file consumes both player slots on
-// whatever server APP_URL points at. Re-running `pnpm check` against the
-// SAME long-lived local dev server will see the game already full on the
-// second run — restart the dev server (or point DB_PATH at a fresh file)
-// between runs. CI is unaffected: it always starts a fresh container with a
-// throwaway /data. Never point APP_URL at the deployed production app for
-// this file — it would occupy the one live game's two seats.
+// IMPORTANT for local runs: running this file consumes the one active
+// series slot on whatever server APP_URL points at. Re-running `pnpm check`
+// against the SAME long-lived local dev server will see the slot already
+// occupied (new connections simply queue) on the second run — restart the
+// dev server (or point DB_PATH at a fresh file) between runs. CI is
+// unaffected: it always starts a fresh container with a throwaway /data.
+// Never point APP_URL at the deployed production app for this file — it
+// would occupy the one live series' two seats.
 //
 // The disconnect-expiry tests near the end of this file actually wait out
 // the server's configured DISCONNECT_GRACE_MS (src/server/index.ts) — this
@@ -32,7 +36,7 @@ const baseUrl = inject("baseUrl");
 const wsUrl = baseUrl.replace(/^http/, "ws") + "/ws";
 
 interface ServerMessage {
-  type: "assigned" | "waiting" | "state" | "full" | "error";
+  type: "assigned" | "waiting" | "queued" | "state" | "error";
   player?: "A" | "B";
   state?: {
     status: "active" | "finished" | "locked" | "abandoned";
@@ -81,33 +85,51 @@ function lastState(messages: ServerMessage[]) {
   return messages.filter((m) => m.type === "state").at(-1)?.state;
 }
 
+// Connects, sends the explicit joinQueue action, and waits for it to take
+// effect — the one new step every test needs now that connecting alone no
+// longer claims anything (Stage 3: "explicitly join a queue").
+async function connectAndJoinQueue(cookie: string): Promise<Client> {
+  const client = await connect(cookie);
+  send(client.ws, { type: "joinQueue" });
+  await wait(100);
+  return client;
+}
+
 let cookieA: string;
 let a: Client;
 let b: Client;
 
 beforeAll(async () => {
   cookieA = await newSessionCookie();
-  a = await connect(cookieA);
+  a = await connectAndJoinQueue(cookieA);
   await wait(100);
-  b = await connect(await newSessionCookie());
+  b = await connectAndJoinQueue(await newSessionCookie());
   await wait(200);
 });
 
-it("pairs the first two sessions as A and B, and starts the game for both", () => {
-  expect(a.messages[0]).toEqual({ type: "assigned", player: "A" });
-  expect(a.messages[1]).toEqual({ type: "waiting" });
-  expect(b.messages[0]).toEqual({ type: "assigned", player: "B" });
-  // A was already connected and waiting; completing the pair must have
-  // pushed it a state too, not just the newly-connecting B.
+it("requires an explicit joinQueue before a seat is assigned", () => {
+  // a's very first message, before it ever sent joinQueue, must not already
+  // be an assignment — connecting alone claims nothing.
+  expect(a.messages[0]).not.toEqual(expect.objectContaining({ type: "assigned" }));
+});
+
+it("pairs the first two queued sessions as A and B, and starts the game for both", () => {
+  expect(a.messages).toContainEqual({ type: "assigned", player: "A" });
+  expect(b.messages).toContainEqual({ type: "assigned", player: "B" });
+  // A was already queued and waiting; completing the pair must have
+  // pushed it a state too, not just the newly-queueing B.
   expect(lastState(a.messages)).toBeDefined();
   expect(lastState(b.messages)).toBeDefined();
 });
 
-it("rejects a third visitor outright", async () => {
-  const c = await connect(await newSessionCookie());
-  await wait(200);
-  expect(c.messages).toContainEqual({ type: "full" });
+it("queues a third visitor rather than rejecting them outright, since one series is already active", async () => {
+  const c = await connectAndJoinQueue(await newSessionCookie());
+  expect(c.messages).toContainEqual({ type: "queued" });
+  // Not seated: no assignment, no state, while the active series continues.
+  expect(c.messages.some((m) => m.type === "assigned")).toBe(false);
+  expect(c.messages.some((m) => m.type === "state")).toBe(false);
   c.ws.close();
+  await wait(200);
 });
 
 it("enforces turn order and leaves state unchanged on a rejected action", async () => {
@@ -144,7 +166,9 @@ it("resumes the same game for a reconnecting session instead of losing it", asyn
 
   // Simulate A reloading the page: close the socket, reopen with the SAME
   // session cookie (a real browser attaches it automatically on reload;
-  // this never calls newSessionCookie() again).
+  // this never calls newSessionCookie() again). A reconnecting SEATED
+  // session resumes automatically — no joinQueue needed, since it already
+  // holds a seat in an active series.
   a.ws.close();
   await wait(100);
   const aAgain = await connect(cookieA);
@@ -162,27 +186,39 @@ it("resumes the same game for a reconnecting session instead of losing it", asyn
   a = aAgain;
 });
 
-it("frees only the disconnected player's slot once its grace period elapses, leaving the still-connected opponent's session untouched", async () => {
+it("frees only the disconnected player's slot once its grace period elapses, leaving the still-connected opponent's session untouched — and the freed slot goes to whoever's been queued longest, not a new arrival", async () => {
   // Default vitest per-test timeout (5s) isn't enough once this actually
   // waits out a real DISCONNECT_GRACE_MS — see the timeout arg below.
   // A has been closed (previous test) with no reconnect since; B never
   // disconnected at all. Waiting out the grace period relies purely on
   // wall-clock time having passed — there's no timer running anywhere for
   // this test to depend on (Stage 8a is deliberately timer-free).
+  //
+  // Queue a session BEFORE the grace period elapses, so there's a genuine
+  // FIFO ordering to verify once the slot frees — the freed seat must go to
+  // this already-waiting session, not to whoever happens to connect next.
+  const waitingLongest = await connectAndJoinQueue(await newSessionCookie());
+  expect(waitingLongest.messages).toContainEqual({ type: "queued" });
+
   await wait(disconnectGraceMs + 500);
 
   const messageCountBeforeB = b.messages.length;
-  const c = await connect(await newSessionCookie());
+  // A late arrival, queued AFTER the already-waiting session above — must
+  // not cut ahead of it once the slot frees.
+  const lateArrival = await connectAndJoinQueue(await newSessionCookie());
   await wait(200);
 
-  // The third visitor claims A's now-freed slot rather than being rejected.
-  expect(c.messages[0]).toEqual({ type: "assigned", player: "A" });
+  // The longest-waiting queued session claims A's now-freed slot — not the
+  // late arrival, which stays queued.
+  expect(waitingLongest.messages).toContainEqual({ type: "assigned", player: "A" });
+  expect(lateArrival.messages.some((m) => m.type === "assigned")).toBe(false);
+  expect(lateArrival.messages).toContainEqual({ type: "queued" });
 
   // Freeing exactly one slot and refilling it still takes the session map
   // from 1 entry back to 2, which is indistinguishable from the very first
   // pairing ever completing — so it replaces the WHOLE game via the same
-  // justCompletedPair path, not just the departed player's seat. B, who
-  // never left, gets pushed this fresh state too even though B did nothing.
+  // pairing path, not just the departed player's seat. B, who never left,
+  // gets pushed this fresh state too even though B did nothing.
   const newMessagesForB = b.messages.slice(messageCountBeforeB);
   expect(newMessagesForB.some((m) => m.type === "state")).toBe(true);
   const freshState = lastState(b.messages);
@@ -190,23 +226,24 @@ it("frees only the disconnected player's slot once its grace period elapses, lea
   expect(freshState?.players.A.hand.length).toBe(3);
   expect(freshState?.players.B.hand.length).toBe(3);
 
-  c.ws.close();
+  lateArrival.ws.close();
+  waitingLongest.ws.close();
   b.ws.close();
+  await wait(200);
 }, disconnectGraceMs + 5000);
 
-it("frees both slots once nobody reconnects within the grace period, starting a genuinely fresh pairing", async () => {
-  // Both c (as A) and b (as B) were closed at the end of the previous test
-  // with no reconnect since.
+it("frees both slots once nobody reconnects within the grace period, starting a genuinely fresh pairing from the queue", async () => {
+  // waitingLongest (as A) and b (as B) were closed at the end of the
+  // previous test with no reconnect since.
   await wait(disconnectGraceMs + 500);
 
-  const freshA = await connect(await newSessionCookie());
-  await wait(100);
-  expect(freshA.messages[0]).toEqual({ type: "assigned", player: "A" });
-  expect(freshA.messages[1]).toEqual({ type: "waiting" });
+  const freshA = await connectAndJoinQueue(await newSessionCookie());
+  expect(freshA.messages).toContainEqual({ type: "assigned", player: "A" });
+  expect(freshA.messages).toContainEqual({ type: "waiting" });
 
-  const freshB = await connect(await newSessionCookie());
+  const freshB = await connectAndJoinQueue(await newSessionCookie());
   await wait(200);
-  expect(freshB.messages[0]).toEqual({ type: "assigned", player: "B" });
+  expect(freshB.messages).toContainEqual({ type: "assigned", player: "B" });
 
   const state = lastState(freshB.messages);
   expect(state).toBeDefined();

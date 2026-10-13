@@ -15,10 +15,14 @@ export interface SeriesState {
 export interface AppState {
   sessions: SessionMap;
   series: SeriesState | null;
+  // Stage 3: session ids waiting to be matched, FIFO (push to the back,
+  // dequeue from the front) — a session here holds no seat yet and no
+  // SessionEntry exists for it. See sessions.ts's enqueue/dequeuePair.
+  queue: string[];
 }
 
 function emptyAppState(): AppState {
-  return { sessions: {}, series: null };
+  return { sessions: {}, series: null, queue: [] };
 }
 
 // The whole app's state — the session->player map and the game itself — is

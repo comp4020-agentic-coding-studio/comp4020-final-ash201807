@@ -1,88 +1,84 @@
 import { describe, expect, it } from "vitest";
 import {
   bindActiveSeries,
-  joinSession,
+  dequeueOne,
+  enqueue,
   markDisconnected,
+  nextOpenSeat,
+  normalizeQueue,
   normalizeSessions,
   reapExpiredSessions,
+  removeFromQueue,
+  seatOne,
   type SessionMap,
 } from "./sessions.ts";
 
-describe("joinSession", () => {
-  it("assigns the first session Player A", () => {
-    const result = joinSession({}, "s1");
-    expect(result).toEqual({
-      kind: "joined",
-      player: "A",
-      sessions: { s1: { player: "A", seriesId: null, disconnectedAt: null } },
-      justCompletedPair: false,
-    });
+describe("enqueue", () => {
+  it("appends a new session id to an empty queue", () => {
+    expect(enqueue([], "s1")).toEqual(["s1"]);
   });
 
-  it("assigns the second distinct session Player B and reports the pair as complete", () => {
-    const afterFirst = joinSession({}, "s1");
-    if (afterFirst.kind !== "joined") throw new Error("expected joined");
-
-    const afterSecond = joinSession(afterFirst.sessions, "s2");
-    expect(afterSecond).toEqual({
-      kind: "joined",
-      player: "B",
-      sessions: {
-        s1: { player: "A", seriesId: null, disconnectedAt: null },
-        s2: { player: "B", seriesId: null, disconnectedAt: null },
-      },
-      justCompletedPair: true,
-    });
+  it("appends to the back, preserving FIFO order", () => {
+    expect(enqueue(["s1", "s2"], "s3")).toEqual(["s1", "s2", "s3"]);
   });
 
-  it("returns an already-assigned session its existing slot without marking the pair as newly completed", () => {
+  it("is a no-op if the session id is already queued (uniqueness: no double-queueing)", () => {
+    const queue = ["s1", "s2"];
+    expect(enqueue(queue, "s1")).toBe(queue);
+  });
+});
+
+describe("removeFromQueue", () => {
+  it("removes the given session id, leaving the rest in order", () => {
+    expect(removeFromQueue(["s1", "s2", "s3"], "s2")).toEqual(["s1", "s3"]);
+  });
+
+  it("is a no-op (same reference) for a session id that isn't queued", () => {
+    const queue = ["s1", "s2"];
+    expect(removeFromQueue(queue, "unknown")).toBe(queue);
+  });
+});
+
+describe("dequeueOne", () => {
+  it("returns null for an empty queue", () => {
+    expect(dequeueOne([])).toBeNull();
+  });
+
+  it("dequeues the front (longest-waiting) id, preserving the rest in order", () => {
+    expect(dequeueOne(["s1", "s2", "s3"])).toEqual({ sessionId: "s1", rest: ["s2", "s3"] });
+  });
+
+  it("dequeues the only entry, leaving an empty rest", () => {
+    expect(dequeueOne(["s1"])).toEqual({ sessionId: "s1", rest: [] });
+  });
+});
+
+describe("nextOpenSeat", () => {
+  it("returns A for an empty session map", () => {
+    expect(nextOpenSeat({})).toBe("A");
+  });
+
+  it("returns B once A is taken", () => {
     const sessions: SessionMap = { s1: { player: "A", seriesId: null, disconnectedAt: null } };
-    const result = joinSession(sessions, "s1");
-    expect(result).toEqual({ kind: "joined", player: "A", sessions, justCompletedPair: false });
+    expect(nextOpenSeat(sessions)).toBe("B");
   });
 
-  it("rejects a third distinct session once both slots are taken", () => {
-    const sessions: SessionMap = {
-      s1: { player: "A", seriesId: "series-1", disconnectedAt: null },
-      s2: { player: "B", seriesId: "series-1", disconnectedAt: null },
-    };
-    const result = joinSession(sessions, "s3");
-    expect(result).toEqual({ kind: "full" });
+  it("returns A if only B happens to be taken (order of arrival determines the slot, not identity)", () => {
+    const sessions: SessionMap = { s1: { player: "B", seriesId: null, disconnectedAt: null } };
+    expect(nextOpenSeat(sessions)).toBe("A");
+  });
+});
+
+describe("seatOne", () => {
+  it("seats the given session id as the given player, with no series yet", () => {
+    expect(seatOne({}, "s1", "A")).toEqual({ s1: { player: "A", seriesId: null, disconnectedAt: null } });
   });
 
-  it("still returns an existing player's own slot even after a third session has been rejected", () => {
-    const sessions: SessionMap = {
-      s1: { player: "A", seriesId: "series-1", disconnectedAt: null },
-      s2: { player: "B", seriesId: "series-1", disconnectedAt: null },
-    };
-    const result = joinSession(sessions, "s2");
-    expect(result).toEqual({ kind: "joined", player: "B", sessions, justCompletedPair: false });
-  });
-
-  it("assigns Player A even if the first session to join happens to be recorded as B-first in an empty map", () => {
-    // Order of arrival determines the slot, not any fixed identity — the
-    // first ever caller gets A regardless of session id contents.
-    const result = joinSession({}, "whoever-shows-up-first");
-    expect(result.kind).toBe("joined");
-    if (result.kind === "joined") expect(result.player).toBe("A");
-  });
-
-  it("clears a previously-disconnected session's grace mark on reconnect", () => {
-    const sessions: SessionMap = { s1: { player: "A", seriesId: "series-1", disconnectedAt: 1000 } };
-    const result = joinSession(sessions, "s1");
-    expect(result).toEqual({
-      kind: "joined",
-      player: "A",
-      sessions: { s1: { player: "A", seriesId: "series-1", disconnectedAt: null } },
-      justCompletedPair: false,
-    });
-  });
-
-  it("leaves an already-connected session's entry identity untouched (no unnecessary copy)", () => {
-    const sessions: SessionMap = { s1: { player: "A", seriesId: "series-1", disconnectedAt: null } };
-    const result = joinSession(sessions, "s1");
-    if (result.kind !== "joined") throw new Error("expected joined");
-    expect(result.sessions).toBe(sessions);
+  it("does not disturb other sessions already in the map", () => {
+    const sessions: SessionMap = { other: { player: "A", seriesId: "series-1", disconnectedAt: null } };
+    const result = seatOne(sessions, "s1", "B");
+    expect(result.other).toEqual({ player: "A", seriesId: "series-1", disconnectedAt: null });
+    expect(result.s1).toEqual({ player: "B", seriesId: null, disconnectedAt: null });
   });
 });
 
@@ -99,7 +95,7 @@ describe("bindActiveSeries", () => {
     });
   });
 
-  it("overwrites a previously-bound seriesId rather than preserving it", () => {
+  it("overwrites a previously-bound seriesId rather than preserving it — including for a survivor whose whole match is being replaced via Stage 8a's known slot-refill limitation", () => {
     const sessions: SessionMap = { s1: { player: "A", seriesId: "old-series", disconnectedAt: null } };
     const result = bindActiveSeries(sessions, "new-series");
     expect(result).toEqual({ s1: { player: "A", seriesId: "new-series", disconnectedAt: null } });
@@ -191,5 +187,22 @@ describe("normalizeSessions", () => {
     expect(normalizeSessions(undefined)).toEqual({});
     expect(normalizeSessions(null)).toEqual({});
     expect(normalizeSessions("garbage")).toEqual({});
+  });
+});
+
+describe("normalizeQueue", () => {
+  it("passes a current-shape queue array through unchanged", () => {
+    expect(normalizeQueue(["s1", "s2"])).toEqual(["s1", "s2"]);
+  });
+
+  it("treats missing (pre-Stage-3) or non-array input as an empty queue", () => {
+    expect(normalizeQueue(undefined)).toEqual([]);
+    expect(normalizeQueue(null)).toEqual([]);
+    expect(normalizeQueue("garbage")).toEqual([]);
+    expect(normalizeQueue({})).toEqual([]);
+  });
+
+  it("drops any non-string entries rather than guessing at them", () => {
+    expect(normalizeQueue(["s1", 42, null, "s2"])).toEqual(["s1", "s2"]);
   });
 });
