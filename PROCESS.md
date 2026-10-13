@@ -352,28 +352,86 @@ reading code back; idempotent settlement specifically needs a test that
 forces both players' grace periods to expire close together, not just one
 at a time.
 
+## Stage 2 — stable match/series identifiers, still one series at a time
+
+The smallest safe step in Stage 9's planned order: make "the one game" that
+exists today addressable by a stable id, without enabling the queue,
+concurrency, or best-of-three scoring yet. A read-only review (this
+conversation) inventoried every read/write site of the old `appState.game`
+(9 sites, all in `server.ts`) before any code changed, confirming `engine.ts`
+needed zero changes — it only ever touches `GameState`/`PlayerId`, never a
+series concept.
+
+`AppState.game: GameState | null` (`src/server/persistence.ts`) became
+`AppState.series: SeriesState | null`, where `SeriesState = { seriesId,
+games: GameState[] }` — `games` holds exactly one entry for now; nothing
+about how many games or series can exist changes in this stage.
+`SessionEntry` (`src/server/sessions.ts`) gained a `seriesId: string | null`
+field alongside its existing `player`/`disconnectedAt`, so a session
+resolves to "which series" rather than that being an unstated singleton
+assumption. `seriesId` is generated the same way `newSessionId()` already
+was (`randomBytes(16).toString("hex")`), at the exact moment a pair used to
+call `createInitialState()` directly — that moment is unchanged, it's just
+followed by wrapping the result and stamping both sessions via the new
+`bindActiveSeries`. `server.ts` gained one `currentGame(series)` accessor
+(`series?.games[0] ?? null`) so the "exactly one game" assumption for this
+stage lives in exactly one place, not at every call site. `normalizeSessions`
+was extended, same reasoning as its existing pre-Stage-8a upgrade path: a
+persisted row with no `seriesId` field reads as `seriesId: null` — the safe
+default, never auto-abandons a session that's actually fine.
+
+Deliberately **not** touched: `protocol.ts` — with only one series ever
+alive, the client has nothing to disambiguate yet, so `seriesId` stays
+server-internal until real concurrency (a later stage) gives the wire
+protocol an actual reason to carry it.
+
+Verified exactly like every prior stage — by running the result, not
+reading code back: `pnpm typecheck` and `pnpm test:engine` (79 tests) pass
+unchanged; `spec/game.test.ts`'s 8 tests and `spec/invariants.test.ts`'s 2
+needed **zero edits** and all pass against a locally running server on a
+fresh database — confirming this stage introduced no behavioural change,
+exactly as planned. `sessions.test.ts`'s object literals needed the new
+field added (mechanical, not a logic change), plus new cases for
+`bindActiveSeries` and the pre-Stage-2-row upgrade path. Inspected the
+persisted SQLite row directly after a live pairing: `series.seriesId` and
+both sessions' `seriesId` match, confirming the field is actually populated,
+not just type-checked.
+
+**Known compatibility gap, not resolved here:** the live deployed
+`/data/game.db` still holds the old `{sessions, game}` shape. `load()`
+(`persistence.ts`) does a blind `JSON.parse(...) as AppState` with no shape
+validation — loading an old-shape row under this new type would read
+`series` as `undefined` while the real, possibly in-progress `GameState`
+sits inert under the now-unused `game` key: silently inaccessible, not a
+crash. Per the read-only review's own recommendation and Stage 6's already-
+accepted precedent for a schema break at this scale, the plan is to clear
+the one live game on next deploy rather than write a one-off migration
+function — but clearing it is exactly the kind of touch to `/data/game.db`
+this repo's `CLAUDE.md` requires an explicit go-ahead for, so it hasn't been
+done and isn't implied by this stage landing in git.
+
 ## Not yet built
 
 The real client UI — the current one is a bare, unstyled debug page — and
 the Expansion/Board-Locked/New-Game/voluntary-termination surfaced in it;
 `quitRequested` specifically has no UI at all yet.
 
-Stage 9's whole decision is design-only so far — nothing in it is
-implemented, including the five closed sub-decisions above:
-- Stable match/series identifiers and the `SeriesState`-shaped wrapper
-  (nothing in today's `AppState`/`GameState` carries one).
+Stage 9's decision is mostly still design-only; Stage 2 above is the first
+implemented slice. Still not implemented:
 - The FIFO queue itself and match allocation off it (today's pairing is
-  "first two sessions ever," not a queue).
+  still "first two sessions ever," not a queue).
 - True concurrency — multiple series existing and being broadcast to at
-  once (today's `sockets`/`broadcastState` assume exactly one shared game).
+  once (`sockets`/`broadcastState` still assume exactly one active series,
+  via the new `currentGame` accessor).
 - Best-of-three score tracking and the next-game-in-series handoff.
 - The per-series generalization of Stage 8a's disconnect-grace mechanism,
   plus the new series-forfeit and single-sided-quit actions.
+- Clearing the live deployment's old-shape persisted game (see Stage 2's
+  own "known compatibility gap" above) — not yet authorized or done.
 
-Planned order (smallest safe step first, not yet started): introduce
-match/series identifiers while still running exactly one series at a time
-and keeping today's tests passing, before the queue, concurrency, or
-best-of-three logic is layered on top. Each step gets its own explicit
-go-ahead before code changes, per this repo's own `CLAUDE.md`.
+Each further step gets its own explicit go-ahead before code changes, per
+this repo's own `CLAUDE.md` — Stage 2 above was reviewed read-only first,
+then implemented only once authorized, and the same applies to deploying
+it.
 
 This file is rewritten, not appended to, each time.

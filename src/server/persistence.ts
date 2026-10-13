@@ -2,13 +2,23 @@ import { DatabaseSync } from "node:sqlite";
 import type { GameState } from "../game/types.ts";
 import type { SessionMap } from "./sessions.ts";
 
+// Stage 2: wraps the one game that exists today behind a stable id, without
+// changing anything about how many games can exist at once — `games` always
+// holds exactly one entry for now. engine.ts stays unaware this wrapper
+// exists at all (per PROCESS.md's Stage 9 guiding principle): it's addressed
+// and created by server.ts exactly as createInitialState() was before.
+export interface SeriesState {
+  seriesId: string;
+  games: GameState[];
+}
+
 export interface AppState {
   sessions: SessionMap;
-  game: GameState | null;
+  series: SeriesState | null;
 }
 
 function emptyAppState(): AppState {
-  return { sessions: {}, game: null };
+  return { sessions: {}, series: null };
 }
 
 // The whole app's state — the session->player map and the game itself — is

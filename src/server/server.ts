@@ -3,14 +3,27 @@ import { readFileSync } from "node:fs";
 import { createServer as createHttpServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { WebSocketServer, type WebSocket } from "ws";
 import { confirmNewGame, createInitialState, drawCard, endTurn, playCard, rejectQuit, requestQuit } from "../game/engine.ts";
-import type { PlayerId } from "../game/types.ts";
+import type { GameState, PlayerId } from "../game/types.ts";
 import { parseSessionId, sessionCookieHeader } from "./cookies.ts";
-import type { Persistence } from "./persistence.ts";
+import type { Persistence, SeriesState } from "./persistence.ts";
 import type { ClientMessage, ServerMessage } from "./protocol.ts";
-import { joinSession, markDisconnected, normalizeSessions, reapExpiredSessions } from "./sessions.ts";
+import { bindActiveSeries, joinSession, markDisconnected, normalizeSessions, reapExpiredSessions } from "./sessions.ts";
 
 function newSessionId(): string {
   return randomBytes(16).toString("hex");
+}
+
+// Same id scheme as newSessionId — a seriesId has no format relationship to
+// a sessionId, they just both want a short unguessable random token.
+function newSeriesId(): string {
+  return randomBytes(16).toString("hex");
+}
+
+// Stage 2 keeps exactly one series alive at a time, so "the current game"
+// is always games[0] — this accessor is the one place that assumption
+// lives, instead of every call site spelling out series.games[0] directly.
+function currentGame(series: SeriesState | null): GameState | null {
+  return series?.games[0] ?? null;
 }
 
 export interface ServerOptions {
@@ -61,8 +74,9 @@ export function createServer(persistence: Persistence, options: ServerOptions = 
   }
 
   function broadcastState(): void {
-    if (!appState.game) return;
-    for (const ws of sockets.keys()) send(ws, { type: "state", state: appState.game });
+    const game = currentGame(appState.series);
+    if (!game) return;
+    for (const ws of sockets.keys()) send(ws, { type: "state", state: game });
   }
 
   // Makes sure this browser has a session cookie, without claiming a player
@@ -104,7 +118,7 @@ export function createServer(persistence: Persistence, options: ServerOptions = 
   } {
     appState.sessions = reapExpiredSessions(appState.sessions, Date.now(), disconnectGraceMs);
     if (Object.keys(appState.sessions).length === 0) {
-      appState.game = null;
+      appState.series = null;
     }
 
     const sessionId = parseSessionId(req.headers.cookie) ?? newSessionId();
@@ -117,7 +131,11 @@ export function createServer(persistence: Persistence, options: ServerOptions = 
     if (result.kind === "full") return { player: null, justCompletedPair: false, sessionId };
 
     appState.sessions = result.sessions;
-    if (result.justCompletedPair) appState.game = createInitialState();
+    if (result.justCompletedPair) {
+      const seriesId = newSeriesId();
+      appState.series = { seriesId, games: [createInitialState()] };
+      appState.sessions = bindActiveSeries(appState.sessions, seriesId);
+    }
     persistence.save(appState);
 
     return { player: result.player, justCompletedPair: result.justCompletedPair, sessionId };
@@ -173,14 +191,15 @@ export function createServer(persistence: Persistence, options: ServerOptions = 
         // created, so every open socket (including whichever player was
         // already connected and sitting at "waiting") needs the new state.
         broadcastState();
-      } else if (appState.game) {
-        send(ws, { type: "state", state: appState.game });
+      } else if (currentGame(appState.series)) {
+        send(ws, { type: "state", state: currentGame(appState.series)! });
       } else {
         send(ws, { type: "waiting" });
       }
 
       ws.on("message", (raw) => {
-        if (!appState.game) return; // can't happen once two players are paired
+        const game = currentGame(appState.series);
+        if (!game) return; // can't happen once two players are paired
 
         let message: ClientMessage;
         try {
@@ -192,22 +211,22 @@ export function createServer(persistence: Persistence, options: ServerOptions = 
 
         try {
           if (message.type === "play") {
-            playCard(appState.game, player, message.handIndex, message.row, message.col);
+            playCard(game, player, message.handIndex, message.row, message.col);
           } else if (message.type === "draw") {
-            drawCard(appState.game, player);
+            drawCard(game, player);
           } else if (message.type === "endTurn") {
-            endTurn(appState.game, player);
+            endTurn(game, player);
           } else if (message.type === "confirmNewGame") {
             // Unlike the other actions, confirmNewGame can return a BRAND
             // NEW GameState (once both players have confirmed) rather than
-            // mutate appState.game in place — the reassignment here is load
-            // bearing, not cosmetic. Session identities (appState.sessions)
-            // are untouched either way.
-            appState.game = confirmNewGame(appState.game, player);
+            // mutate the existing one in place — the reassignment here is
+            // load bearing, not cosmetic. Session identities
+            // (appState.sessions) are untouched either way.
+            appState.series!.games[0] = confirmNewGame(game, player);
           } else if (message.type === "requestQuit") {
-            requestQuit(appState.game, player);
+            requestQuit(game, player);
           } else if (message.type === "rejectQuit") {
-            rejectQuit(appState.game, player);
+            rejectQuit(game, player);
           } else {
             throw new Error("unknown message type");
           }
