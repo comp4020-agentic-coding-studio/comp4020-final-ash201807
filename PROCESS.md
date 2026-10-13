@@ -189,12 +189,71 @@ the read-only analysis that preceded it:
   effect (Stage 8c)" suite covers Fire specifically, including the two
   lethal-check cases above.
 
+## Stage 9 — decision: spectator mode and consent-based seat rotation
+
+Directed by the project owner, not a bug or a playtesting finding (same
+category as Stages 8b/8c): the app's shape itself changes, from "exactly
+two players, a third visitor rejected outright" (the v1.0 README's own
+point 4) to "two active players plus any number of real-time spectators,"
+with explicit rules for how a seat changes hands. This is recorded here as
+a decision before any of it is implemented — `README.md` and `CLAUDE.md`
+still describe today's actual two-player-only behaviour and stay that way
+until the code underneath actually changes; this repo doesn't claim
+behaviour it hasn't built and tested.
+
+The four rules agreed:
+
+1. **Normal match.** A and B are the only active players. Any other visitor
+   becomes a real-time spectator rather than being turned away, seeing the
+   same server-authoritative state everyone else does.
+2. **A player goes offline.** Unchanged in substance from Stage 8a's
+   grace-period mechanism, already built: once the grace period elapses, if
+   the opponent is still connected, a new arrival may take over the vacant
+   seat — choosing to continue the existing game or request a new one. (This
+   is the same "continue vs. new game" choice Stage 8a already named as its
+   own open item; it isn't being replaced, just re-homed inside the bigger
+   spectator framework below.)
+3. **Both players offline, or the match has already ended.** The old game
+   must not permanently occupy the one shared slot — it's cleared, and
+   queued spectators get paired into a fresh match. After an ordinary match
+   end, queued spectators are offered the next match in turn.
+4. **Seat-swap while both players are still active and the match is
+   dragging on.** A spectator may request to replace one specific active
+   player. Confirmed deliberately asymmetric from Stage 8b's
+   `requestQuit`/`rejectQuit`: that shape needs *both* players to agree,
+   because it ends a shared game early for both of them. A seat-swap only
+   touches one player's seat, so it needs only the targeted player's
+   agreement — the other player isn't asked and isn't affected. This will
+   need its own consent primitive in a later stage (likely a single-sided
+   accept/decline, not the existing mutual one); it does not reuse
+   `requestQuit`/`rejectQuit` as-is. Independent of, and never blocking or
+   waiting on, the disconnected-player takeover in point 2.
+
+Recorded verbatim as the project owner's own ADR-style summary of this
+decision:
+
+> The game supports two active players and multiple real-time spectators.
+> Player replacement is handled through explicit lifecycle rules:
+> disconnected seats may be reclaimed after a grace period, and active
+> players may be asked to make room for spectators through a consent-based
+> rotation mechanism. All game-state changes remain server-authoritative.
+
 ## Not yet built
 
 The real client UI — the current one is a bare, unstyled debug page — and
 the Expansion/Board-Locked/New-Game/voluntary-termination surfaced in it;
-`quitRequested` specifically has no UI at all yet. The "continue vs. new
-game" seat-choice redesign named in Stage 8a is fully designed but not
-implemented — it'll naturally need the `quitRequested` UI at the same time,
-since the "new game" branch of that choice routes through it. This file is
-rewritten, not appended to, each time.
+`quitRequested` specifically has no UI at all yet.
+
+Stage 9's whole decision is design-only so far — none of it is implemented:
+- The spectator role itself (a third-or-later visitor currently gets
+  rejected outright, per the still-accurate current README/CLAUDE.md).
+- The disconnected-seat "continue vs. new game" choice (point 2) — fully
+  designed since Stage 8a (data flow, protocol messages, a
+  `takeOverSession` primitive, edge cases around a returning original
+  player), still not built. Will need the `quitRequested` UI at the same
+  time, since its "new game" branch routes through that flow.
+- The spectator queue and next-match handoff (point 3).
+- The single-sided seat-swap consent primitive and its protocol messages
+  (point 4) — intentionally not `requestQuit`/`rejectQuit`, see above.
+
+This file is rewritten, not appended to, each time.
