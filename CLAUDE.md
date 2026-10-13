@@ -26,10 +26,15 @@ regression against this app's definition of good, not a convenience.
 
 ## Don't grow the audience this app is for
 
-README point 4. No accounts, login, matchmaking, multiple concurrent games,
-chat, or spectator mode. One shared game, two players, a third visitor
-rejected outright. If a task seems to need one of these, it's a sign the task
-is out of scope for this app, not a sign to add it.
+README point 4. No accounts, login, skill rating, choice of opponent,
+leaderboard, chat, or spectator mode. As of Stage 9/4b (see `PROCESS.md`),
+the app supports any number of independent two-player matches running
+concurrently, fed by one explicit FIFO queue — this is matchmaking sized
+for a small group of friends taking turns, not any of the things listed
+above. Treat that concurrency as the current, deliberate shape of the app,
+not as evidence it's safe to add the rest: a feature that needs accounts,
+a lobby browser, skill-based pairing, or a spectator role is still out of
+scope, not a natural next step from "more than one match at a time."
 
 ## Tests
 

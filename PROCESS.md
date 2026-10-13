@@ -778,6 +778,46 @@ modified, created, or deleted by this stage — only this `PROCESS.md` entry.
 Production database: untouched. No `git push`, no deploy, no commit beyond
 this documentation update.
 
+## Stage 4d — fix CLAUDE.md's stale single-game wording
+
+Documentation only, deliberately deferred until Stage 4b/4c actually
+shipped and were verified (per the agreed Stage 4 split), rather than
+updating it piecemeal after every sub-stage.
+
+`CLAUDE.md`'s "Don't grow the audience this app is for" section still read
+"One shared game, two players, a third visitor rejected outright" — flagged
+as stale by the Stage 4 read-only review (this conversation) and confirmed
+again at every sub-stage since, since Stage 3 already made it false (a
+third visitor queues) and Stage 4b made it false in a second way (any
+number of matches run concurrently). Left uncorrected, a future agent
+reading `CLAUDE.md` fresh — which is exactly what it's for — would be told
+matchmaking and concurrent matches are out of scope, when they're the
+app's actual, shipped, tested shape.
+
+Rewritten to state the current rule accurately: no accounts, login, skill
+rating, choice of opponent, leaderboard, chat, or spectator role; any
+number of independent concurrent two-player matches, fed by one explicit
+FIFO queue, is the deliberate current shape — and explicitly warns against
+reading that concurrency as license to add the rest (a lobby browser,
+skill-based pairing, accounts) just because "more than one match at a
+time" is no longer the boundary.
+
+Cross-checked the rest of `PROCESS.md`'s own text and `README.md` against
+actual current behaviour while here (this stage's own "cross-checking"
+scope, per its original name in the "Not yet built" list): README's "What
+good means here" point 4 and "Checked in spec/" paragraph were already
+updated in Stage 4b itself (not deferred — only `CLAUDE.md` was). Every
+other `PROCESS.md` mention of "one shared game"/"third visitor rejected"
+is inside a historical stage's own record of what was true *at that time*
+(Stage 2's original decision log, Stage 9's "what changed and why"
+framing) — accurate as history, not a live claim about today's behaviour,
+and consistent with this file's own convention of recording what changed
+and why rather than only the current state. No other stale claims found.
+
+**Not touched, confirmed:** `src/`, `spec/`, `client/` — no application or
+test code; `fly.toml`, `Dockerfile`, CI config; production database; no
+`git push`, no deploy.
+
 ## Not yet built
 
 The real client UI — the current one is a bare, unstyled debug page — and
@@ -785,13 +825,10 @@ the Expansion/Board-Locked/New-Game/voluntary-termination surfaced in it;
 `quitRequested` specifically has no UI at all yet. The lobby/join-queue
 step added in Stage 3 is likewise bare — a single unstyled button.
 
-Stage 9's decision is mostly still design-only; Stages 2, 3, 4a, 4b, and 4c
-above are the implemented/verified slices so far. Still not implemented:
-- **Stage 4d** — fixing `CLAUDE.md`'s stale "one shared game, third visitor
-  rejected" section (confirmed contradicted by Stage 3's own already-
-  shipped behaviour, and again by Stage 4b's) and cross-checking it against
-  what's actually shipped — deliberately deferred rather than updated
-  piecemeal per-sub-stage.
+Stage 9's own decision (FIFO matchmaking, concurrent independent matches)
+is now fully implemented, verified, and documented — Stages 2, 3, 4a, 4b,
+4c, and 4d above complete that entire line of work. Still not implemented,
+unrelated to Stage 9/4's own scope:
 - Best-of-three score tracking and the next-game-in-series handoff —
   confirmed orthogonal to Stage 4's own `seriesList` keying (a series' own
   `games: GameState[]` already supports more than one entry structurally),
@@ -812,8 +849,8 @@ above are the implemented/verified slices so far. Still not implemented:
   authorized or done.
 
 Each further step gets its own explicit go-ahead before code changes, per
-this repo's own `CLAUDE.md` — Stages 2, 3, 4a, 4b, and 4c above were each
-reviewed read-only first, then implemented/verified only once separately
-authorized, and the same applies to deploying any of them.
+this repo's own `CLAUDE.md` — Stages 2, 3, 4a, 4b, 4c, and 4d above were
+each reviewed read-only first, then implemented/verified only once
+separately authorized, and the same applies to deploying any of them.
 
 This file is rewritten, not appended to, each time.
