@@ -189,54 +189,168 @@ the read-only analysis that preceded it:
   effect (Stage 8c)" suite covers Fire specifically, including the two
   lethal-check cases above.
 
-## Stage 9 — decision: spectator mode and consent-based seat rotation
+## Stage 9 — decision: FIFO matchmaking, concurrent matches, best-of-three
 
 Directed by the project owner, not a bug or a playtesting finding (same
-category as Stages 8b/8c): the app's shape itself changes, from "exactly
-two players, a third visitor rejected outright" (the v1.0 README's own
-point 4) to "two active players plus any number of real-time spectators,"
-with explicit rules for how a seat changes hands. This is recorded here as
-a decision before any of it is implemented — `README.md` and `CLAUDE.md`
-still describe today's actual two-player-only behaviour and stay that way
-until the code underneath actually changes; this repo doesn't claim
-behaviour it hasn't built and tested.
+category as Stages 8b/8c) — and itself a revision of an earlier version of
+this same stage. An initial Stage 9 draft proposed spectator mode plus a
+single-sided seat-swap, bolted onto the existing one-shared-game model
+(see git history, commit `39b8b52`, for that superseded text). A read-only
+analysis against the real code showed that design still capped the app at
+one game at a time and didn't actually address matchmaking or series play —
+so the project owner replaced it with the actual goal: the app's shape
+changes from "exactly two players, a third visitor rejected outright" (the
+v1.0 README's own point 4) to a friends-first lobby supporting explicit FIFO
+matchmaking, multiple independent concurrent matches, and best-of-three
+series. This is recorded here as a decision before any of it is
+implemented — `README.md` and `CLAUDE.md` still describe today's actual
+single-shared-game behaviour and stay that way until the code underneath
+actually changes; this repo doesn't claim behaviour it hasn't built and
+tested.
 
-The four rules agreed:
+**Guiding principle, confirmed with the project owner:** keep match/series
+lifecycle (matchmaking, series score, forfeits) a server-level concern,
+never invented into `src/game/engine.ts`. The engine stays exactly what it
+is — pure single-game rules, fixed by the Game Specification — and every
+new concept below is deliberately a wrapper around it, not a change to it.
 
-1. **Normal match.** A and B are the only active players. Any other visitor
-   becomes a real-time spectator rather than being turned away, seeing the
-   same server-authoritative state everyone else does.
-2. **A player goes offline.** Unchanged in substance from Stage 8a's
-   grace-period mechanism, already built: once the grace period elapses, if
-   the opponent is still connected, a new arrival may take over the vacant
-   seat — choosing to continue the existing game or request a new one. (This
-   is the same "continue vs. new game" choice Stage 8a already named as its
-   own open item; it isn't being replaced, just re-homed inside the bigger
-   spectator framework below.)
-3. **Both players offline, or the match has already ended.** The old game
-   must not permanently occupy the one shared slot — it's cleared, and
-   queued spectators get paired into a fresh match. After an ordinary match
-   end, queued spectators are offered the next match in turn.
-4. **Seat-swap while both players are still active and the match is
-   dragging on.** A spectator may request to replace one specific active
-   player. Confirmed deliberately asymmetric from Stage 8b's
-   `requestQuit`/`rejectQuit`: that shape needs *both* players to agree,
-   because it ends a shared game early for both of them. A seat-swap only
-   touches one player's seat, so it needs only the targeted player's
-   agreement — the other player isn't asked and isn't affected. This will
-   need its own consent primitive in a later stage (likely a single-sided
-   accept/decline, not the existing mutual one); it does not reuse
-   `requestQuit`/`rejectQuit` as-is. Independent of, and never blocking or
-   waiting on, the disconnected-player takeover in point 2.
+### Agreed product rules
 
-Recorded verbatim as the project owner's own ADR-style summary of this
-decision:
+**Lobby and matchmaking.** Players explicitly join a FIFO queue. The server
+pairs the two longest-waiting eligible players. Multiple matches run
+concurrently. A player belongs to at most one active queue slot or active
+series at a time. Once matched, both players are removed from the queue and
+bound to the same series. A disconnected *waiting* (queued, not yet
+matched) player is removed from the queue outright — no grace period, since
+no game state is at stake yet; reconnecting means queueing again. After a
+series finishes, both players return to the lobby and must explicitly queue
+again — no auto-requeue.
 
-> The game supports two active players and multiple real-time spectators.
-> Player replacement is handled through explicit lifecycle rules:
-> disconnected seats may be reclaimed after a grace period, and active
-> players may be asked to make room for spectators through a consent-based
-> rotation mechanism. All game-state changes remain server-authoritative.
+**Single-game engine, unchanged.** Existing card-game rules and
+`engine.ts`'s tests are preserved as-is. Each individual game keeps its own
+independent `GameState` — HP, AP, hand, board, and single-game outcome never
+carry over between games in a series. Best-of-three logic does not belong
+in the pure engine; confirmed not unavoidable (see below), so it doesn't go
+there.
+
+**Best-of-three series.** At most three games; first to win two games wins
+the series. Each game's outcome and the running series score are recorded
+server-side, distinct from any individual `GameState`. After a
+non-terminal game, the same two players continue to the next game in the
+same series via the existing mutual-confirmation shape. After a series
+ends, both players return to the lobby and must explicitly queue again.
+
+**Disconnect, reconnect, forfeit.** A disconnect during an active series
+gets a grace period (Stage 8a's existing mechanism, generalized to be
+scoped per-series rather than global). Reconnecting within it restores the
+same player identity, match, and series. Letting the grace period expire
+forfeits the *entire series*, not just the in-progress game. An explicit
+quit/forfeit immediately awards the series to the opponent. Queue
+disconnection just removes the player from the queue (see above). The app
+recovers consistent queue, session, match, and series state after a server
+restart.
+
+### Five decisions closed, beyond the agreed rules above
+
+A read-only architecture review (this conversation) surfaced five product
+questions the rules above left open. Closed as follows, confirmed with the
+project owner, before any implementation:
+
+1. **Both players' grace periods expire together.** The series is marked
+   `"abandoned"`, no winner, both player bindings released — mirrors
+   `GameState`'s own existing `"abandoned"` status (Stage 8b) at the series
+   level, so a series that nobody finished is never silently credited to
+   either side.
+2. **What an explicit single-sided forfeit does to the in-progress
+   `GameState`.** The server awards the series to the opponent directly,
+   treating series status as the sole authority — `engine.ts` and the
+   forfeited game's own `GameState` are **not** touched. The server rejects
+   any further `play`/`draw`/`endTurn` against that series once forfeited,
+   and the client is told the series has ended explicitly. If the existing
+   debug client turns out to need `GameState.status` itself to say "over"
+   for its display logic, that gets solved in the protocol/client layer
+   when it's actually built, not by adding a forfeit concept to the engine.
+3. **Whether finished series keep any history.** No permanent match history
+   or history browsing page in this first version. A finished series keeps
+   a minimal result record (series winner, final score) rather than being
+   discarded outright, so a "you won/lost 2-1" result can still be shown —
+   but retention is bounded, not indefinite, to avoid unbounded growth in
+   the single SQLite blob. The exact retention count and when old records
+   are swept are decided at implementation time, informed by how the client
+   actually needs to read this state, not fixed in advance here.
+4. **A forfeited player's session reconnecting afterward.** They're shown
+   that the series has ended and its result, then returned to the lobby. A
+   finished series cannot be resumed and no longer accepts actions against
+   it; starting again means queueing afresh like anyone else.
+5. **Server restart and the waiting queue.** In-progress series are
+   persisted and restored (this is the capability actually worth protecting
+   — e.g. a series already 1-0 mid-second-game). The waiting queue is
+   **not** restored; every previously-queued, not-yet-matched player must
+   explicitly re-queue after reconnecting. Stale WebSocket connections are
+   cleared on startup. This deliberately doesn't try to preserve FIFO queue
+   position across a restart — only match/series continuity is treated as
+   something that must survive.
+
+Three principles tie these five together, recorded as reasoning for future
+stages to check new decisions against, not just these five:
+- **A series has exactly one authoritative outcome.** Timeout, explicit
+  forfeit, an ordinary win, and both-sides-disappearing must never produce
+  conflicting end states for the same series.
+- **Engine and server lifecycle stay separate.** `GameState` owns single-game
+  rules; the server owns player identity, match/series ownership, series
+  score, and final settlement. Nothing above moves rule logic into the
+  engine or lifecycle logic into it either.
+- **Restart recovery prioritizes in-progress matches over the queue.** The
+  queue can always be rebuilt by asking players to queue again; a series
+  partway through cannot be reconstructed from nothing, so it's the one
+  thing restart recovery must not lose.
+
+One cross-cutting requirement flagged explicitly, not yet designed in
+detail: **series settlement must be idempotent.** If both players disconnect
+at nearly the same moment, the server may observe both timeouts separately;
+a series that's already been settled (abandoned, forfeited, or won) must
+never be settled a second time, double-release its player bindings, or
+flip its recorded outcome. This needs to hold regardless of which of the
+decisions above (1, 2, or an ordinary finish) triggers settlement first.
+
+### Recommended ADR (recorded, not yet implemented)
+
+**Context:** the app's founding design (README's "What good means here,"
+point 4) assumed exactly one shared game, built for two named people rather
+than a matchmaking pool. The project owner has confirmed a different product
+shape is now wanted: FIFO matchmaking, concurrent independent matches, and
+best-of-three series.
+
+**Decision:** model this as (a) a FIFO queue of waiting sessions, (b) any
+number of independent series objects, each wrapping one to three
+engine-owned `GameState`s left completely untouched, (c) per-session
+player-binding records (queued / bound to a series seat / disconnected
+pending grace) replacing today's flat global `SessionEntry`. `engine.ts`
+requires zero rule changes; all new complexity is server/session/
+persistence-layer.
+
+**Alternatives considered:** the original Stage 9 draft (spectator mode +
+single-sided seat-swap on the existing one-game model, `39b8b52`) —
+superseded, since it doesn't deliver matchmaking or series play, which
+turned out to be the actual goal.
+
+**Consequences:** a one-time, unmigrated schema break on the live
+`/data/game.db` (same precedent as Stage 6 — cleared, not migrated); several
+of `spec/game.test.ts`'s existing black-box tests need rewriting, most
+severely the "rejects a third visitor outright" test, whose premise inverts
+entirely once a third visitor queues instead of being turned away; Stage
+8a's disconnect-grace mechanism needs generalizing from global to
+per-series scope, including rethinking when stale state gets reaped now
+that there's more than one game that could need it; a new single-sided
+forfeit action is needed alongside (not replacing) the existing mutual
+`requestQuit`/`rejectQuit`.
+
+**Validation:** same discipline as every prior stage here — verify by
+actually running the result (Stage 8a's own precedent: kill and restart the
+server process mid-grace-period against the same database file), not just
+reading code back; idempotent settlement specifically needs a test that
+forces both players' grace periods to expire close together, not just one
+at a time.
 
 ## Not yet built
 
@@ -244,16 +358,22 @@ The real client UI — the current one is a bare, unstyled debug page — and
 the Expansion/Board-Locked/New-Game/voluntary-termination surfaced in it;
 `quitRequested` specifically has no UI at all yet.
 
-Stage 9's whole decision is design-only so far — none of it is implemented:
-- The spectator role itself (a third-or-later visitor currently gets
-  rejected outright, per the still-accurate current README/CLAUDE.md).
-- The disconnected-seat "continue vs. new game" choice (point 2) — fully
-  designed since Stage 8a (data flow, protocol messages, a
-  `takeOverSession` primitive, edge cases around a returning original
-  player), still not built. Will need the `quitRequested` UI at the same
-  time, since its "new game" branch routes through that flow.
-- The spectator queue and next-match handoff (point 3).
-- The single-sided seat-swap consent primitive and its protocol messages
-  (point 4) — intentionally not `requestQuit`/`rejectQuit`, see above.
+Stage 9's whole decision is design-only so far — nothing in it is
+implemented, including the five closed sub-decisions above:
+- Stable match/series identifiers and the `SeriesState`-shaped wrapper
+  (nothing in today's `AppState`/`GameState` carries one).
+- The FIFO queue itself and match allocation off it (today's pairing is
+  "first two sessions ever," not a queue).
+- True concurrency — multiple series existing and being broadcast to at
+  once (today's `sockets`/`broadcastState` assume exactly one shared game).
+- Best-of-three score tracking and the next-game-in-series handoff.
+- The per-series generalization of Stage 8a's disconnect-grace mechanism,
+  plus the new series-forfeit and single-sided-quit actions.
+
+Planned order (smallest safe step first, not yet started): introduce
+match/series identifiers while still running exactly one series at a time
+and keeping today's tests passing, before the queue, concurrency, or
+best-of-three logic is layered on top. Each step gets its own explicit
+go-ahead before code changes, per this repo's own `CLAUDE.md`.
 
 This file is rewritten, not appended to, each time.
