@@ -692,6 +692,92 @@ server restart with 2+ concurrent in-progress series live — still Stage
 4c's job specifically, not attempted here; `CLAUDE.md`'s stale wording
 (still Stage 4d).
 
+## Stage 4c — verified: real kill-and-restart with 2+ concurrent series live
+
+Verification-only, per the agreed Stage 4 split — no application code
+changed. A read-only design review (this conversation) preceded it, same
+discipline as every stage so far; it traced Stage 8a's own original
+restart-verification precedent back to its actual commit (`f49612a`) and
+confirmed that check was always a one-off manual kill-and-restart, never a
+committed automated test — this stage follows the same precedent rather
+than building new sub-process-managing test infrastructure (the review's
+own reasoning: `spec/`'s whole harness tests against an already-running
+external process via `APP_URL`, which is structurally incompatible with a
+test that kills and restarts the very process it's testing; CI runs the
+app inside a Docker container, where killing the app process would kill the
+container running the test too).
+
+**Environment:** a throwaway local server (`node src/server/index.ts`),
+`DB_PATH` pointed at a scratch SQLite file inside this repo's own
+gitignored `data/` directory (confirmed ignored via `git check-ignore`
+before use, never committed, deleted afterward), `DISCONNECT_GRACE_MS=5000`
+for a fast but still-real wall-clock wait. The verification script itself
+lived only in that same scratch directory for the duration of the check and
+was deleted immediately after — nothing from it is part of this commit.
+
+**Scenario, orchestrated by a single script (not ad hoc manual steps, so
+every timestamp is captured precisely rather than estimated by eye):**
+three concurrent series (A, B, C) were formed against generation 1 of the
+server. Series B's both players stayed fully connected throughout, as the
+"must remain completely undisturbed" control group. Series A had its
+player B close its socket; after confirming (via a direct SQLite read) that
+the real `disconnectedAt` timestamp was persisted, the server process was
+killed with `628ms` of a `5000ms` grace period elapsed — comfortably mid-
+grace-period, confirmed by the script's own assertion, and timed to land
+after the close handler's `persistence.save()` had already returned (per
+the design review's own recommendation: testing whether the *application's
+logic* survives a restart, not probing SQLite's own crash-safety boundary
+mid-write). Series C had BOTH players close their sockets before the kill,
+so its grace period would fully elapse while the process was down.
+Generation 2 was then started against the exact same `DB_PATH`.
+
+**Results — all 22 assertions in the script passed, none soft-failed:**
+- Series B's both players reconnected cleanly after the restart, and its
+  resumed `GameState` was confirmed byte-for-byte identical to its state
+  captured immediately before the kill — multi-series persistence and
+  restoration (the core new claim Stage 4b's concurrency introduced)
+  holds.
+- Series A's survivor reconnected cleanly; triggering a reap immediately
+  after the restart (elapsed: 1702ms of the 5000ms budget) correctly did
+  **not** yet forfeit series A — the grace period is computed against the
+  real persisted `disconnectedAt` timestamp from before the kill, not reset
+  by the restart. The script then waited only the *additional* real time
+  needed to cross the original 5000ms threshold (confirmed: 5513ms total
+  elapsed since the actual disconnect) before triggering reap again —
+  deliberately not "wait some more and hope," but computed against the
+  ground-truth timestamp.
+- Once genuinely elapsed, series A correctly forfeited: its survivor
+  received `seriesEnded`/`opponentDisconnected`, could immediately re-queue
+  (confirming their own session was released, not held for a replacement),
+  and series C — both players gone — was silently abandoned with no
+  message sent to anyone, exactly per the two settlement branches Stage 4b
+  implemented.
+- Cross-series isolation held across the restart specifically, not just
+  within one process's lifetime: series B received zero extra messages as
+  a side effect of series A/C's settlement, both immediately after
+  restart and again after the forfeit actually fired.
+- Direct SQLite inspection after everything settled: exactly one series
+  (B's) remained in `seriesList`, its persisted `GameState` still
+  byte-for-byte identical to its pre-kill snapshot; exactly 2 sessions
+  remained bound, both to that surviving series' own `seriesId`, with no
+  stale `disconnectedAt` timestamps left behind. A and C were both cleanly
+  removed from `seriesList` with no trace, and removing them did not
+  touch B's own entry — confirmed structurally, not just behaviorally.
+
+**No bugs found.** Every claim Stage 4b made that a restart could plausibly
+break — multi-series persistence, per-session `seriesId` resolution,
+wall-clock-correct grace-period tracking across a process restart,
+abandonment when both players expire during downtime, and cross-series
+isolation holding across the restart — held exactly as designed. Per the
+agreed process, finding a bug here would have paused this stage and gone
+back for separate authorization before touching any application code; that
+didn't happen.
+
+**Not touched, confirmed:** no application or test source file was
+modified, created, or deleted by this stage — only this `PROCESS.md` entry.
+Production database: untouched. No `git push`, no deploy, no commit beyond
+this documentation update.
+
 ## Not yet built
 
 The real client UI — the current one is a bare, unstyled debug page — and
@@ -699,13 +785,8 @@ the Expansion/Board-Locked/New-Game/voluntary-termination surfaced in it;
 `quitRequested` specifically has no UI at all yet. The lobby/join-queue
 step added in Stage 3 is likewise bare — a single unstyled button.
 
-Stage 9's decision is mostly still design-only; Stages 2, 3, 4a, and 4b
-above are the implemented slices so far. Still not implemented:
-- **Stage 4c** — verification-only: actually killing and restarting the
-  server process with 2+ concurrent in-progress series live, confirming
-  each is restored correctly and none bleed into each other. Never tested
-  by anyone before, even by this repo's own established restart-testing
-  habit (Stage 8a's single-series version of this exact check).
+Stage 9's decision is mostly still design-only; Stages 2, 3, 4a, 4b, and 4c
+above are the implemented/verified slices so far. Still not implemented:
 - **Stage 4d** — fixing `CLAUDE.md`'s stale "one shared game, third visitor
   rejected" section (confirmed contradicted by Stage 3's own already-
   shipped behaviour, and again by Stage 4b's) and cross-checking it against
@@ -731,8 +812,8 @@ above are the implemented slices so far. Still not implemented:
   authorized or done.
 
 Each further step gets its own explicit go-ahead before code changes, per
-this repo's own `CLAUDE.md` — Stages 2, 3, 4a, and 4b above were each
-reviewed read-only first, then implemented only once separately authorized,
-and the same applies to deploying any of them.
+this repo's own `CLAUDE.md` — Stages 2, 3, 4a, 4b, and 4c above were each
+reviewed read-only first, then implemented/verified only once separately
+authorized, and the same applies to deploying any of them.
 
 This file is rewritten, not appended to, each time.
