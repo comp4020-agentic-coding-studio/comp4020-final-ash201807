@@ -1,5 +1,17 @@
 import type { GameState, PlayerId } from "../game/types.ts";
 
+// Stage 5: the running best-of-three score, alongside whichever individual
+// GameState is currently being shown — server-level bookkeeping the engine
+// itself never produces, so it's threaded onto the wire separately rather
+// than folded into GameState's own shape (see persistence.ts's SeriesState
+// for why: GameState stays single-game-only, every series-level concept
+// lives outside it).
+export interface SeriesScore {
+  gamesWon: Record<PlayerId, number>;
+  seriesStatus: "active" | "finished" | "abandoned";
+  seriesWinner: PlayerId | null;
+}
+
 export type ServerMessage =
   | { type: "assigned"; player: PlayerId }
   | { type: "waiting" }
@@ -10,7 +22,7 @@ export type ServerMessage =
   // visitor is no longer rejected outright, so that message is now
   // unreachable and has been removed rather than left as dead protocol.
   | { type: "queued" }
-  | { type: "state"; state: GameState }
+  | { type: "state"; state: GameState; series: SeriesScore }
   // Stage 4b: a seated session's series ended by forfeit rather than by
   // ordinary play — sent only to the survivor (the opponent whose grace
   // period expired is, by definition, not connected to receive anything).
@@ -22,6 +34,15 @@ export type ServerMessage =
   // the moment this is sent, so they must explicitly re-queue afterward,
   // same as after any other ended series.
   | { type: "seriesEnded"; reason: "opponentDisconnected" }
+  // Stage 5: the series itself concluded through ordinary play — either a
+  // player reached 2 game-wins (series.seriesStatus "finished", seriesWinner
+  // set), or a mid-series game was mutually abandoned (requestQuit/
+  // rejectQuit on an in-progress game), which ends the WHOLE series
+  // winner-less per the project owner's confirmed decision, not just that
+  // one game. Sent to BOTH players (unlike the forfeit case above, both are
+  // still connected here) with the final score attached; both sessions are
+  // released the moment this is sent, same "must explicitly re-queue" rule.
+  | { type: "seriesEnded"; reason: "seriesConcluded"; series: SeriesScore }
   | { type: "error"; message: string };
 
 export type ClientMessage =

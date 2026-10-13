@@ -13,14 +13,19 @@ effect: Lightning steals the opponent's next-turn AP, Water refills the
 credited player's hand, Nature grants them another action now, and Fire deals
 10 extra damage straight to the opponent (so a Type Combo's total is 15, and
 an Owner Combo that's also same-type totals 25). Neither match means no
-Combo. First to 0 HP loses outright — including when Fire's own extra damage
-is what crosses zero, not just the base hit — a full board with neither
-player dead locks instead, with no winner. Either player can also end an
-active game early if the other agrees; neither case has a winner. Any ending
-needs both players to confirm a new game before one starts — a rematch
-doesn't reset it out from under the other. The rules are fixed by a
-specification, four times revised after real two-player playtesting, agreed
-before this code was written; what to build on top was mine to decide.
+Combo. First to 0 HP loses that game — including when Fire's own extra
+damage is what crosses zero, not just the base hit — a full board with
+neither player dead locks that game instead, as a draw: neither counts
+toward either player's score. A match is best of three games: the first
+player to win two games wins the match, win/draw scores carrying over from
+one game to the next within it. Either player can also end the current game
+early if the other agrees; unlike a normal win, that ends the whole match
+immediately with no winner, since there's no rule yet for fairly resuming a
+match after one of its games was called off. Any non-deciding game needs
+both players to confirm starting the next one — a rematch doesn't reset it
+out from under the other. The rules are fixed by a specification, four
+times revised after real two-player playtesting, agreed before this code
+was written; what to build on top was mine to decide.
 
 ## What good means here
 
@@ -63,19 +68,25 @@ own independent match the moment a second one arrives, with no ceiling on
 how many matches run concurrently; one match's state, actions, and errors
 never reach another match's players, and a reconnecting session always
 resumes its own match specifically, never an unrelated concurrent one; an
-out-of-turn action, and confirming a new game mid-match, are rejected and
-change nothing; reconnecting with the same session resumes the game rather
-than losing it; a session that disconnects and never comes back forfeits
-its *entire match* to the opponent once its grace period elapses —
-surviving an actual process restart mid-grace-period, not just elapsed time
-in one long-lived process — without disturbing any other match running at
-the same time, while a session that's still connected is left alone; if
-both players of a match disconnect and neither returns, that match is
-abandoned with no winner, silently, rather than counted as anyone's win; a
-session that disconnects while still only queued (never seated) is removed
-from the queue outright, no grace period; and voluntarily ending an active
-game, including the other player rejecting that request, works end-to-end
-over the real transport. Checked in
+out-of-turn action, and confirming the next game while the current one is
+still active, are rejected and change nothing; reconnecting with the same
+session resumes the game rather than losing it; a session that disconnects
+and never comes back forfeits its *entire match* to the opponent once its
+grace period elapses — surviving an actual process restart mid-grace-period,
+not just elapsed time in one long-lived process — without disturbing any
+other match running at the same time, while a session that's still
+connected is left alone; if both players of a match disconnect and neither
+returns, that match is abandoned with no winner, silently, rather than
+counted as anyone's win; a session that disconnects while still only queued
+(never seated) is removed from the queue outright, no grace period;
+starting a match's next game resets the board and hands but never its
+running score, confirmed directly against the persisted data, not just the
+live broadcast; reaching a second win correctly ends the match rather than
+starting a third game, crediting whichever player actually reached two
+wins rather than whoever happened to win the most recent one; and
+voluntarily ending the current game early, including the other player
+rejecting that request, works end-to-end over the real transport —
+agreeing to end it ends the whole match, not just that one game. Checked in
 `src/game/engine.test.ts`, against the rules engine directly: AP costs, every
 Combo direction and type combination, damage and effect stacking (including
 Fire's own extra-damage effect, and its own lethal check separate from the

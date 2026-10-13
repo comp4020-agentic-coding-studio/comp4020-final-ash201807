@@ -5,8 +5,9 @@ import { WebSocketServer, type WebSocket } from "ws";
 import { confirmNewGame, createInitialState, drawCard, endTurn, playCard, rejectQuit, requestQuit } from "../game/engine.ts";
 import type { GameState, PlayerId } from "../game/types.ts";
 import { parseSessionId, sessionCookieHeader } from "./cookies.ts";
-import { normalizeSeriesList, type Persistence } from "./persistence.ts";
-import type { ClientMessage, ServerMessage } from "./protocol.ts";
+import { normalizeSeriesList, type Persistence, type SeriesState } from "./persistence.ts";
+import type { ClientMessage, ServerMessage, SeriesScore } from "./protocol.ts";
+import { settleGameOutcome } from "./series.ts";
 import {
   dequeuePair,
   enqueue,
@@ -100,8 +101,17 @@ export function createServer(persistence: Persistence, options: ServerOptions = 
     if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(message));
   }
 
+  // Stage 5: a series can now hold more than one game — the "current" one
+  // being played/shown is always the LAST entry (earlier ones are already
+  // concluded history the series' own gamesWon score already accounts for).
   function currentGame(seriesId: string): GameState | null {
-    return appState.seriesList[seriesId]?.games[0] ?? null;
+    const series = appState.seriesList[seriesId];
+    if (!series) return null;
+    return series.games[series.games.length - 1];
+  }
+
+  function seriesScore(series: SeriesState): SeriesScore {
+    return { gamesWon: series.gamesWon, seriesStatus: series.seriesStatus, seriesWinner: series.seriesWinner };
   }
 
   // Stage 4b: takes an explicit seriesId and filters `sockets` down to just
@@ -110,11 +120,13 @@ export function createServer(persistence: Persistence, options: ServerOptions = 
   // independent series now possible, "every seated socket" is no longer a
   // safe recipient list for any one series' state.
   function broadcastState(seriesId: string): void {
+    const series = appState.seriesList[seriesId];
+    if (!series) return;
     const game = currentGame(seriesId);
     if (!game) return;
     for (const [ws, sessionId] of sockets) {
       if (appState.sessions[sessionId]?.seriesId === seriesId) {
-        send(ws, { type: "state", state: game });
+        send(ws, { type: "state", state: game, series: seriesScore(series) });
       }
     }
   }
@@ -210,7 +222,13 @@ export function createServer(persistence: Persistence, options: ServerOptions = 
       appState.queue = rest;
       const seriesId = newSeriesId();
       appState.sessions = seatPair(appState.sessions, seriesId, first, second);
-      appState.seriesList[seriesId] = { seriesId, games: [createInitialState()] };
+      appState.seriesList[seriesId] = {
+        seriesId,
+        games: [createInitialState()],
+        gamesWon: { A: 0, B: 0 },
+        seriesWinner: null,
+        seriesStatus: "active",
+      };
 
       for (const [sessionId, seat] of [[first, "A"], [second, "B"]] as const) {
         const ws = queuedSockets.get(sessionId);
@@ -299,8 +317,9 @@ export function createServer(persistence: Persistence, options: ServerOptions = 
         sockets.set(ws, sessionId);
         send(ws, { type: "assigned", player: player! });
         const entry = appState.sessions[sessionId];
+        const series = entry?.seriesId ? appState.seriesList[entry.seriesId] : undefined;
         const game = entry?.seriesId ? currentGame(entry.seriesId) : null;
-        if (game) send(ws, { type: "state", state: game });
+        if (game && series) send(ws, { type: "state", state: game, series: seriesScore(series) });
         else send(ws, { type: "waiting" });
       } else if (status === "queued") {
         queuedSockets.set(sessionId, ws);
@@ -337,10 +356,12 @@ export function createServer(persistence: Persistence, options: ServerOptions = 
 
         const entry = appState.sessions[sessionId];
         const seriesId = entry?.seriesId;
+        const series = seriesId ? appState.seriesList[seriesId] : undefined;
         const game = seriesId ? currentGame(seriesId) : null;
-        if (!entry || !seriesId || !game) return; // not seated in an active series; ignore game actions
+        if (!entry || !seriesId || !series || !game) return; // not seated in an active series; ignore game actions
 
         const seatedPlayer = entry.player;
+        const statusBefore = game.status;
         try {
           if (message.type === "play") {
             playCard(game, seatedPlayer, message.handIndex, message.row, message.col);
@@ -349,12 +370,33 @@ export function createServer(persistence: Persistence, options: ServerOptions = 
           } else if (message.type === "endTurn") {
             endTurn(game, seatedPlayer);
           } else if (message.type === "confirmNewGame") {
-            // Unlike the other actions, confirmNewGame can return a BRAND
-            // NEW GameState (once both players have confirmed) rather than
-            // mutate the existing one in place — the reassignment here is
-            // load bearing, not cosmetic. Session identities
-            // (appState.sessions) are untouched either way.
-            appState.seriesList[seriesId].games[0] = confirmNewGame(game, seatedPlayer);
+            // Stage 5: confirmNewGame's own mutual-confirmation shape is
+            // reused completely unchanged (it still just flips
+            // restartConfirmed and, once both agree, returns a brand NEW
+            // GameState) — what changed is what the server does with that
+            // return value. No separate "series already ended" guard is
+            // needed here: the moment a series concludes (below), both its
+            // sessions are released and the series itself is deleted from
+            // seriesList in the SAME synchronous handler call that settled
+            // it — so a later confirmNewGame from either former player
+            // already fails the `!entry` check above before reaching this
+            // branch at all. Adding a redundant check here for a state this
+            // branch can never actually observe would be validating against
+            // an impossible scenario, not a real one.
+            const nextGame = confirmNewGame(game, seatedPlayer);
+            if (nextGame !== game) {
+              // Both players just confirmed — nextGame is a genuinely NEW
+              // GameState, appended as the series' next game (never
+              // replacing games[0], and never touching gamesWon/
+              // seriesWinner/seriesStatus in this same write: those are
+              // separate fields on the same object, updated only by
+              // settleGameOutcome, never by this push).
+              series.games.push(nextGame);
+            }
+            // Either way (one confirmation, or both just reused above), the
+            // mutation already happened on `game`/`series.games` in place
+            // via confirmNewGame's own restartConfirmed flip — nothing
+            // further needed here.
           } else if (message.type === "requestQuit") {
             requestQuit(game, seatedPlayer);
           } else if (message.type === "rejectQuit") {
@@ -364,6 +406,42 @@ export function createServer(persistence: Persistence, options: ServerOptions = 
           }
         } catch (err) {
           send(ws, { type: "error", message: err instanceof Error ? err.message : "invalid action" });
+          return;
+        }
+
+        // The game this action acted on just concluded (it wasn't already
+        // concluded before this action — confirmNewGame's own "cannot start
+        // a new game while this one is still active" check, and every other
+        // action's identical guard, already ensures this fires at most once
+        // per concluded game): fold its outcome into the series' own score
+        // before anyone is told anything.
+        if (statusBefore === "active" && currentGame(seriesId)!.status !== "active") {
+          settleGameOutcome(series);
+        }
+
+        if (series.seriesStatus !== "active") {
+          // The series itself just concluded (2 wins reached, or this
+          // game's "abandoned" ended the whole series per the project
+          // owner's decision) — both players are still connected here
+          // (unlike the forfeit-on-disconnect path), so both get told
+          // directly, then both sessions are released so re-queuing is
+          // required, exactly like every other ended-series path. Collect
+          // both session ids BEFORE releasing either, same reasoning
+          // reapAndSettleSeries already follows: deleting one must never
+          // change what the other's own lookup finds.
+          const finishedScore = seriesScore(series);
+          for (const memberSessionId of sessionsInSeries(appState.sessions, seriesId)) {
+            for (const [memberWs, sid] of sockets) {
+              if (sid === memberSessionId) {
+                send(memberWs, { type: "seriesEnded", reason: "seriesConcluded", series: finishedScore });
+                sockets.delete(memberWs);
+                break;
+              }
+            }
+            appState.sessions = releaseSession(appState.sessions, memberSessionId);
+          }
+          delete appState.seriesList[seriesId];
+          persistence.save(appState);
           return;
         }
 

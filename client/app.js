@@ -3,6 +3,7 @@
 let selectedHandIndex = null;
 let myPlayer = null;
 let lastState = null;
+let lastSeries = null;
 
 const statusEl = document.getElementById("status");
 const joinQueueBtn = document.getElementById("joinqueue-btn");
@@ -39,14 +40,25 @@ ws.addEventListener("message", (event) => {
     handEl.textContent = "";
   } else if (message.type === "state") {
     lastState = message.state;
-    render(lastState);
+    lastSeries = message.series;
+    render(lastState, lastSeries);
   } else if (message.type === "seriesEnded") {
     myPlayer = null;
     lastState = null;
+    lastSeries = null;
     boardEl.textContent = "";
     handEl.textContent = "";
     joinQueueBtn.style.display = "";
-    statusEl.textContent = "Your opponent disconnected and didn't return — you win by forfeit. Click \"Join queue\" to start a new match.";
+    if (message.reason === "opponentDisconnected") {
+      statusEl.textContent = "Your opponent disconnected and didn't return — you win the series by forfeit. Click \"Join queue\" to start a new match.";
+    } else {
+      const { gamesWon, seriesWinner } = message.series;
+      const scoreText = `${gamesWon.A}-${gamesWon.B}`;
+      const resultText = seriesWinner
+        ? `Player ${seriesWinner} wins the series ${scoreText}!`
+        : `The series ended with no winner (${scoreText}).`;
+      statusEl.textContent = `${resultText} Click "Join queue" to start a new match.`;
+    }
   } else if (message.type === "error") {
     log("[server error] " + message.message);
   }
@@ -56,7 +68,7 @@ function send(message) {
   ws.send(JSON.stringify(message));
 }
 
-function render(state) {
+function render(state, series) {
   const size = state.board.length;
 
   boardEl.innerHTML = "";
@@ -104,6 +116,7 @@ function render(state) {
     `You are Player ${myPlayer} | HP you:${me.hp} opp:${opponent.hp} | ` +
     `AP:${state.ap} | ${turnInfo} | status:${state.status}`;
   if (state.winner) text += ` | winner:${state.winner}`;
+  if (series) text += ` | series score A:${series.gamesWon.A} B:${series.gamesWon.B}`;
   if (state.status !== "active") {
     text += ` | New Game confirmed — you:${state.restartConfirmed[myPlayer]} opponent:${state.restartConfirmed[opponentId]}`;
   }

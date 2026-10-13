@@ -818,6 +818,118 @@ and why rather than only the current state. No other stale claims found.
 test code; `fly.toml`, `Dockerfile`, CI config; production database; no
 `git push`, no deploy.
 
+## Stage 5 — best-of-three series lifecycle
+
+A read-only design review (this conversation) preceded it, same discipline
+as every stage since 9. It confirmed `engine.ts` needed zero changes — every
+series-level concept (running score, series-level winner, series status)
+lives entirely in `persistence.ts`'s `SeriesState`, never in `GameState`,
+continuing the exact boundary Stage 4b already established: `GameState`
+owns single-game rules, `SeriesState` owns the lifecycle wrapped around it.
+It also surfaced one genuine question the original Stage 9 rules and the
+Stage 4 work hadn't settled, closed by the project owner before
+implementation: a "locked" (drawn) game counts toward neither player's
+score, and — since draws could otherwise let a series run indefinitely
+without either player ever reaching 2 wins — there is deliberately **no
+cap** on how many games a series can run through; "best of three" describes
+the normal (no-draws) case, not a hard ceiling enforced anywhere.
+
+`SeriesState` gained three fields: `gamesWon: Record<PlayerId, number>`,
+`seriesWinner: PlayerId | null`, `seriesStatus: "active" | "finished" |
+"abandoned"`. `games: GameState[]` can now hold more than one entry, each a
+genuinely fresh `GameState` from `createInitialState()` same as before —
+nothing about how a single game plays changes. New `src/server/series.ts`
+holds the one pure function this adds, `settleGameOutcome(series)`: reads
+the LAST game's `status`/`winner` and folds it into the series' own score,
+exactly once per concluded game (guaranteed by every game action's own
+existing "cannot act on an already-concluded game" guard — there's no path
+that could call this twice against the same conclusion). Three outcomes,
+each closed with the project owner before implementation:
+- `"finished"` (a real win): increments the winner's `gamesWon`; reaching 2
+  sets `seriesWinner` and flips `seriesStatus` to `"finished"`.
+- `"locked"` (a draw): no-op. Confirmed: counts toward nobody's score, the
+  series simply continues — including through several draws in a row, with
+  no upper bound on `games.length` anywhere in this logic.
+- `"abandoned"` (mutual `requestQuit`/`rejectQuit` mid-series, Stage 8b's
+  existing mechanism, unchanged): ends the WHOLE series winner-less,
+  immediately, regardless of the score coming in — confirmed with the
+  project owner: there's no rule yet for fairly continuing a series after
+  one of its games was called off, so a leader abandoning a game gets no
+  credit for it, and a series that was 1-0 when abandoned ends at 1-0,
+  nobody's win. `gamesWon` is left exactly as it was — neither incremented
+  nor reset — only `seriesStatus`/`seriesWinner` change. Deliberately
+  distinct from Stage 4b's disconnect-forfeit path (which always awards the
+  WHOLE series to whoever's still there): a mutual abandon has genuinely no
+  winner, a forfeit always does.
+
+The message handler's `confirmNewGame` branch is the other half of this
+stage: `confirmNewGame` itself is reused completely unchanged (still just
+flips `restartConfirmed`, still only returns a new `GameState` once both
+have agreed) — what changed is what the server does with that return
+value. Once both confirm, the new `GameState` is `series.games.push()`-ed
+(a new game within the SAME series, running score carried over) rather than
+replacing `games[0]` the way Stage 2-4b's single-game model always did.
+`settleGameOutcome` runs immediately after any action that just concluded a
+game, before anything is broadcast; if that settlement left the series
+itself non-`"active"`, both players (still connected — unlike the
+disconnect-forfeit path, where only the survivor can receive anything) are
+sent a new `{type: "seriesEnded", reason: "seriesConcluded", series:
+<final score>}`, both their `SessionEntry`s are released, and the series is
+deleted from `seriesList` — all synchronously, in the same handler call
+that settled it, so there is no intermediate state where a stale
+`confirmNewGame` from either former player could reach anything: by the
+time one could arrive, `appState.sessions` no longer has an entry for
+either session id, and the existing `if (!entry || ...)` guard at the top
+of the handler already discards it, same as any message from an unseated
+session. (An earlier draft added a redundant `seriesStatus !== "active"`
+check inside the `confirmNewGame` branch specifically — removed once manual
+verification proved it unreachable: validating against a scenario this
+branch can never actually observe, not a real one, per this repo's own
+"don't write checks for the impossible" discipline.)
+
+`protocol.ts` gained a `SeriesScore` type (`gamesWon`/`seriesStatus`/
+`seriesWinner`) carried on every `state` message and the new
+`seriesConcluded` variant of `seriesEnded` — the debug client renders the
+running score alongside the board and shows the final score/winner on
+conclusion.
+
+Verified two ways, not just one: `pnpm check` (103 unit tests — up from 93,
+including a new `series.test.ts` covering 1:0/1:1/2:0/2:1 progressions
+plus the locked-draw and abandoned-mid-series cases directly against
+engineered `GameState` fixtures, since reaching a real `finished`/`locked`
+game through actual live random play isn't practical to script
+deterministically — the same already-established limitation
+`engine.test.ts` itself notes; 16 black-box `spec/` tests, including a
+rewrite of the old "ends the game... allows a fresh game afterward" test
+into one asserting the WHOLE series ends on mutual abandon, and a new
+cross-series-isolation test confirming an unrelated concurrent series
+receives nothing as a side effect); and a genuinely real end-to-end
+scenario, run manually outside the committed test suite (same precedent as
+Stage 6/8b's own "forced a finished state directly" verification, and
+Stage 4c's own real-kill-and-restart discipline): paired two real sessions,
+directly edited the persisted board/HP via SQLite to put the next real
+`play` message one move from lethal, actually killed and restarted the
+server process between edits (editing the DB file while a live process
+keeps running would just be silently overwritten by its next save — the
+same reasoning Stage 4c's restart verification already established), then
+let the REAL `playCard` call over the real transport perform the actual
+status transition — not faking the end state outright. Confirmed directly
+against the persisted SQLite row, not just the live broadcast: 1-0 survives
+into game 2 untouched by the board/hand reset; the persisted `games` array
+grows to 2 entries (appended, never replacing `games[0]`); reaching 2-0
+sends `seriesEnded` to both players with `seriesWinner: "A"` (the one who
+actually reached 2 wins, not whoever won the most recent game); the series
+is removed from `seriesList` and both sessions released; and a
+`confirmNewGame` sent immediately afterward produces no response at all,
+confirmed silently ignored rather than erroring.
+
+**Not touched, confirmed:** `src/game/engine.ts`, `src/game/types.ts` —
+zero rule changes, reconfirmed by the design review before implementation
+and true in the actual diff. Production database: a fourth incompatible
+schema change now stacked on the same not-yet-authorized list (`game`→
+`series`, `+queue`, `series`→`seriesList`, now `SeriesState`+3 fields) — no
+clear, no migration, no deploy, no push.
+
 ## Not yet built
 
 The real client UI — the current one is a bare, unstyled debug page — and
@@ -827,12 +939,9 @@ step added in Stage 3 is likewise bare — a single unstyled button.
 
 Stage 9's own decision (FIFO matchmaking, concurrent independent matches)
 is now fully implemented, verified, and documented — Stages 2, 3, 4a, 4b,
-4c, and 4d above complete that entire line of work. Still not implemented,
-unrelated to Stage 9/4's own scope:
-- Best-of-three score tracking and the next-game-in-series handoff —
-  confirmed orthogonal to Stage 4's own `seriesList` keying (a series' own
-  `games: GameState[]` already supports more than one entry structurally),
-  not blocked by anything above.
+4c, and 4d above complete that entire line of work. Stage 5 (best-of-three
+series lifecycle) is also now implemented and verified. Still not
+implemented:
 - The single-sided voluntary-quit action Stage 9 agreed to (immediately
   awarding the series to the opponent, as distinct from the existing mutual
   `requestQuit`/`rejectQuit`) — Stage 4b's forfeit-on-expiry settles the
@@ -845,11 +954,12 @@ unrelated to Stage 9/4's own scope:
   a vacated seat means the whole series already forfeited. Recorded here as
   superseded, not implemented.
 - Clearing the live deployment's old-shape persisted game (`game`/no
-  `queue` field, pre-Stage-2/3; `series`/no keying, pre-Stage-4b) — not yet
-  authorized or done.
+  `queue` field, pre-Stage-2/3; `series`/no keying, pre-Stage-4b;
+  `SeriesState` missing `gamesWon`/`seriesWinner`/`seriesStatus`,
+  pre-Stage-5) — not yet authorized or done.
 
 Each further step gets its own explicit go-ahead before code changes, per
-this repo's own `CLAUDE.md` — Stages 2, 3, 4a, 4b, 4c, and 4d above were
+this repo's own `CLAUDE.md` — Stages 2, 3, 4a, 4b, 4c, 4d, and 5 above were
 each reviewed read-only first, then implemented/verified only once
 separately authorized, and the same applies to deploying any of them.
 

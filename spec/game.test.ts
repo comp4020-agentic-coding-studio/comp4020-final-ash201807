@@ -7,9 +7,13 @@ import WebSocket from "ws";
 // joinQueue is required before a seat is assigned, FIFO pairing forms
 // independent concurrent series (Stage 4b), an out-of-turn action changes
 // nothing, reconnecting with the same session resumes rather than loses the
-// match, and a seated opponent who never reconnects within the grace period
+// match, a seated opponent who never reconnects within the grace period
 // forfeits the WHOLE series to the survivor (Stage 4b: replaces Stage 3's
-// "a stranger refills the empty seat" model).
+// "a stranger refills the empty seat" model), and a mid-series game that's
+// mutually abandoned ends the WHOLE series, winner-less, not just that one
+// game (Stage 5 — the project owner's own confirmed decision: there's no
+// rule yet for fairly continuing a series after one of its games was called
+// off).
 //
 // Stage 4b removed the Stage 3/4a limitation that only one series could be
 // active at a time — any number of independent two-player series can now
@@ -18,6 +22,18 @@ import WebSocket from "ws";
 // the ordinary single-match checks that don't care about concurrency; a
 // later group deliberately runs TWO pairings side by side to check they
 // never interfere with each other.
+//
+// Stage 5 (best-of-three) note on what's NOT tested here: reaching a real
+// "finished" (lethal Combo) or "locked" (full board) game through actual
+// live play isn't practical to script deterministically over real random
+// card draws — the same already-established limitation engine.test.ts's own
+// comments note for single-game testing. The 1:0/1:1/2:0/2:1/locked score
+// progressions that best-of-three introduces are instead covered
+// exhaustively, and more precisely, by src/server/series.test.ts's pure
+// unit tests against engineered GameState fixtures — this file only covers
+// what's actually reachable over the real transport: the mutual-abandon
+// path (reachable via requestQuit/rejectQuit from both sides) and its
+// cross-series isolation.
 //
 // IMPORTANT for local runs: re-running `pnpm check` against the SAME
 // long-lived local dev server reuses whatever state is already there from
@@ -36,6 +52,12 @@ const disconnectGraceMs = Number(process.env.DISCONNECT_GRACE_MS ?? 30_000);
 const baseUrl = inject("baseUrl");
 const wsUrl = baseUrl.replace(/^http/, "ws") + "/ws";
 
+interface SeriesScore {
+  gamesWon: Record<"A" | "B", number>;
+  seriesStatus: "active" | "finished" | "abandoned";
+  seriesWinner: "A" | "B" | null;
+}
+
 interface ServerMessage {
   type: "assigned" | "waiting" | "queued" | "state" | "seriesEnded" | "error";
   player?: "A" | "B";
@@ -47,6 +69,7 @@ interface ServerMessage {
     players: Record<"A" | "B", { hand: unknown[] }>;
     quitRequested: Record<"A" | "B", boolean>;
   };
+  series?: SeriesScore;
   message?: string;
 }
 
@@ -225,27 +248,43 @@ it("clears a pending request for both players when the other one rejects it", as
   expect(lastState(a.messages)?.status).toBe("active");
 });
 
-it("ends the game with no winner once both players request it, and allows a fresh game afterward", async () => {
+it("ends the WHOLE series, winner-less, once both players mutually abandon the current game — not just that one game", async () => {
+  // Stage 5's own confirmed decision: unlike a disconnect forfeit (which
+  // always awards the series to whoever's still there), a MUTUAL abandon
+  // mid-series has no winner at all — there's no rule yet for fairly
+  // continuing after one game was called off, so the entire series ends
+  // here regardless of the score coming in (both players are still
+  // connected, so both are told directly via seriesEnded, unlike the
+  // forfeit path where only the survivor can receive anything).
+  const messageCountBeforeA = a.messages.length;
+  const messageCountBeforeB = b.messages.length;
+
   send(a.ws, { type: "requestQuit" });
   await wait(100);
   send(b.ws, { type: "requestQuit" });
   await wait(200);
 
-  expect(lastState(a.messages)?.status).toBe("abandoned");
-  expect(lastState(b.messages)?.status).toBe("abandoned");
+  const newMessagesForA = a.messages.slice(messageCountBeforeA);
+  const newMessagesForB = b.messages.slice(messageCountBeforeB);
+  const endedForA = newMessagesForA.find((m) => m.type === "seriesEnded");
+  const endedForB = newMessagesForB.find((m) => m.type === "seriesEnded");
 
-  // The ordinary New Game flow (already covered for "locked"/"finished" in
-  // the engine suite) works the same way for "abandoned" over the real
-  // transport — nothing abandonment-specific needed in confirmNewGame.
-  send(a.ws, { type: "confirmNewGame" });
+  expect(endedForA?.reason).toBe("seriesConcluded");
+  expect(endedForB?.reason).toBe("seriesConcluded");
+  expect(endedForA?.series?.seriesStatus).toBe("abandoned");
+  expect(endedForA?.series?.seriesWinner).toBeNull();
+  // Neither player's requestQuit was itself a won game — the series ends
+  // with the score exactly as it was before this mutual abandon (0-0, since
+  // this was still the series' very first game).
+  expect(endedForA?.series?.gamesWon).toEqual({ A: 0, B: 0 });
+  // Both players are told the SAME final score, not divergent views of it.
+  expect(endedForB?.series).toEqual(endedForA?.series);
+
+  // Both sessions were released — rejoining the queue starts a genuinely
+  // fresh pairing/series, it doesn't resume the abandoned one.
+  send(a.ws, { type: "joinQueue" });
   await wait(100);
-  send(b.ws, { type: "confirmNewGame" });
-  await wait(200);
-
-  const freshState = lastState(b.messages);
-  expect(freshState?.status).toBe("active");
-  expect(freshState?.quitRequested).toEqual({ A: false, B: false });
-  expect(freshState?.players.A.hand.length).toBe(3);
+  expect(a.messages.filter((m) => m.type === "queued").length).toBeGreaterThan(0);
 
   a.ws.close();
   b.ws.close();
@@ -415,3 +454,34 @@ it("abandons a series with no winner, notifying nobody, once BOTH players' grace
   fresh.b.ws.close();
   await wait(200);
 }, disconnectGraceMs + 5000);
+
+// --- Stage 5: best-of-three series lifecycle ----------------------------
+
+it("a mutual abandon in one series never touches an unrelated concurrent series' score or state", async () => {
+  const toAbandon = await formAPairing();
+  const unrelated = await formAPairing();
+
+  const unrelatedACountBefore = unrelated.a.messages.length;
+  const unrelatedBCountBefore = unrelated.b.messages.length;
+
+  send(toAbandon.a.ws, { type: "requestQuit" });
+  await wait(100);
+  send(toAbandon.b.ws, { type: "requestQuit" });
+  await wait(200);
+
+  expect(toAbandon.a.messages).toContainEqual(
+    expect.objectContaining({ type: "seriesEnded", reason: "seriesConcluded" }),
+  );
+
+  // The unrelated, still fully-connected concurrent series receives nothing
+  // as a side effect of the other one's series-level settlement.
+  expect(unrelated.a.messages.slice(unrelatedACountBefore)).toHaveLength(0);
+  expect(unrelated.b.messages.slice(unrelatedBCountBefore)).toHaveLength(0);
+  expect(lastState(unrelated.a.messages)?.status).toBe("active");
+
+  toAbandon.a.ws.close();
+  toAbandon.b.ws.close();
+  unrelated.a.ws.close();
+  unrelated.b.ws.close();
+  await wait(200);
+});
