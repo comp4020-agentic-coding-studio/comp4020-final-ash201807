@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { GameState } from "../game/types.ts";
 import type { SeriesState } from "./persistence.ts";
-import { settleGameOutcome } from "./series.ts";
+import { forfeitSeriesTo, settleGameOutcome } from "./series.ts";
 
 // Minimal stand-ins — settleGameOutcome only ever reads status/winner off
 // the last game, so these omit every other GameState field real play would
@@ -88,5 +88,36 @@ describe("settleGameOutcome", () => {
     expect(series.gamesWon).toEqual({ A: 1, B: 0 });
     expect(series.seriesStatus).toBe("abandoned");
     expect(series.seriesWinner).toBeNull();
+  });
+});
+
+describe("forfeitSeriesTo", () => {
+  it("awards the series to the given winner, from a 0-0 start — not credited as a won game", () => {
+    const series = freshSeries([game("active")]);
+    forfeitSeriesTo(series, "B");
+    expect(series.seriesStatus).toBe("finished");
+    expect(series.seriesWinner).toBe("B");
+    // The in-progress game being forfeited is NOT credited as a win — a
+    // forfeit at 0-0 must not manufacture a game neither player finished.
+    expect(series.gamesWon).toEqual({ A: 0, B: 0 });
+  });
+
+  it("awards the series regardless of the leader's own score (forfeiting while BEHIND still wins the series)", () => {
+    const series = freshSeries([game("finished", "B"), game("active")]);
+    series.gamesWon = { A: 0, B: 1 }; // B is leading 1-0
+    forfeitSeriesTo(series, "A"); // A forfeits anyway (e.g. conceding to B) -- exercised the other way below
+    expect(series.seriesWinner).toBe("A");
+    expect(series.seriesStatus).toBe("finished");
+    // The 1-0 score standing at the moment of forfeit is left untouched —
+    // forfeiting judges the SERIES directly, it never rewrites gamesWon.
+    expect(series.gamesWon).toEqual({ A: 0, B: 1 });
+  });
+
+  it("does not touch the current game's own GameState object at all — the engine never learns a forfeit happened", () => {
+    const activeGame = game("active");
+    const series = freshSeries([activeGame]);
+    forfeitSeriesTo(series, "A");
+    expect(series.games[0]).toBe(activeGame);
+    expect(series.games[0].status).toBe("active");
   });
 });

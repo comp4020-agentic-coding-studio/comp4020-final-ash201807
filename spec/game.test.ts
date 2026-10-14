@@ -9,11 +9,13 @@ import WebSocket from "ws";
 // nothing, reconnecting with the same session resumes rather than loses the
 // match, a seated opponent who never reconnects within the grace period
 // forfeits the WHOLE series to the survivor (Stage 4b: replaces Stage 3's
-// "a stranger refills the empty seat" model), and a mid-series game that's
+// "a stranger refills the empty seat" model), a mid-series game that's
 // mutually abandoned ends the WHOLE series, winner-less, not just that one
 // game (Stage 5 — the project owner's own confirmed decision: there's no
 // rule yet for fairly continuing a series after one of its games was called
-// off).
+// off), and one player can unilaterally forfeit the WHOLE series — no
+// agreement needed from the opponent, unlike requestQuit/rejectQuit's
+// mutual shape — immediately awarding it to whoever's still there (Stage 6).
 //
 // Stage 4b removed the Stage 3/4a limitation that only one series could be
 // active at a time — any number of independent two-player series can now
@@ -485,3 +487,65 @@ it("a mutual abandon in one series never touches an unrelated concurrent series'
   unrelated.b.ws.close();
   await wait(200);
 });
+
+// --- Stage 6: unilateral forfeitSeries -----------------------------------
+
+it("lets one player unilaterally forfeit the WHOLE series, awarding it to the opponent with no agreement needed", async () => {
+  const match = await formAPairing();
+  const unrelated = await formAPairing();
+
+  const unrelatedACountBefore = unrelated.a.messages.length;
+  const unrelatedBCountBefore = unrelated.b.messages.length;
+
+  send(match.a.ws, { type: "forfeitSeries" });
+  await wait(200);
+
+  // The forfeiting player (A) gets their own confirmation, distinct in
+  // wording from what the opponent receives.
+  const forfeitConfirmation = match.a.messages.find((m) => m.type === "seriesEnded");
+  expect(forfeitConfirmation?.reason).toBe("forfeited");
+  expect(forfeitConfirmation?.series?.seriesWinner).toBe("B");
+  expect(forfeitConfirmation?.series?.seriesStatus).toBe("finished");
+  // The forfeited game was never credited as an actual win — forfeiting
+  // judges the series directly, it never manufactures a game-win out of an
+  // in-progress, undecided game.
+  expect(forfeitConfirmation?.series?.gamesWon).toEqual({ A: 0, B: 0 });
+
+  // B, who did nothing, is told the opponent forfeited specifically —
+  // distinct from both the disconnect-forfeit and mutual-abandon reasons.
+  const opponentNotice = match.b.messages.find((m) => m.type === "seriesEnded");
+  expect(opponentNotice?.reason).toBe("opponentForfeited");
+  expect(opponentNotice?.series).toEqual(forfeitConfirmation?.series);
+
+  // Both sessions released — rejoining the queue starts a genuinely fresh
+  // pairing/series for either of them, not a resumption of anything.
+  send(match.a.ws, { type: "joinQueue" });
+  await wait(100);
+  expect(match.a.messages.filter((m) => m.type === "queued").length).toBeGreaterThan(0);
+
+  // The unrelated, still fully-connected concurrent series receives nothing
+  // as a side effect of this one's forfeit settling.
+  expect(unrelated.a.messages.slice(unrelatedACountBefore)).toHaveLength(0);
+  expect(unrelated.b.messages.slice(unrelatedBCountBefore)).toHaveLength(0);
+  expect(lastState(unrelated.a.messages)?.status).toBe("active");
+
+  match.a.ws.close();
+  match.b.ws.close();
+  unrelated.a.ws.close();
+  unrelated.b.ws.close();
+  await wait(200);
+});
+
+// Not covered here: rejecting forfeitSeries once the current game has
+// already concluded (finished/locked) but the series itself is still
+// active (both players only waiting to confirm the next game). Reaching a
+// real finished/locked game through actual live play with real random card
+// draws isn't practical to script deterministically over this transport —
+// the same already-established limitation this file's own top comment
+// notes for best-of-three's score progressions. Verified instead by the
+// same manual, real-process method Stage 5 used (see PROCESS.md's Stage 6
+// entry): force a game one move from lethal via a direct SQLite edit, let
+// the real transport finish it for real, then send forfeitSeries into the
+// resulting "game concluded, series still active" gap and confirm it's
+// rejected rather than silently forfeiting a game that already has a real
+// winner.

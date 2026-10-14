@@ -930,6 +930,96 @@ schema change now stacked on the same not-yet-authorized list (`game`→
 `series`, `+queue`, `series`→`seriesList`, now `SeriesState`+3 fields) — no
 clear, no migration, no deploy, no push.
 
+## Stage 6 — unilateral series forfeit
+
+A read-only design review (this conversation) preceded it, same discipline
+as every stage since 9 — it confirmed this was the one piece of Stage 9's
+originally-agreed rules still unbuilt ("An explicit quit/forfeit immediately
+awards the series to the opponent"), distinct from the existing mutual
+`requestQuit`/`rejectQuit` (propose ending the current game, both must
+agree, no winner either way) and from Stage 4b's disconnect-forfeit (same
+"awards the whole series outright" shape, but triggered by a grace period
+elapsing rather than an explicit message). It confirmed `engine.ts` needed
+zero changes — a forfeit is a server-level settlement exactly like Stage
+4b's, not a game rule, so the in-progress `GameState` is left completely
+untouched, never marked concluded in any way.
+
+The project owner closed four points before implementation:
+1. **Allowed even while the opponent is mid-grace-period disconnect.**
+   Forfeiting doesn't depend on the opponent's connection state — it's an
+   independent act, and if the opponent happens to already be
+   disconnected, they still simply win by forfeit. Confirmed this can
+   never double-settle with the disconnect-grace path: whichever one fires
+   first already removes the series from `seriesList` and releases both
+   `SessionEntry`s, so the other path's own lookups (by session id, or by
+   the existing `if (!entry || ...)` guard at the top of the message
+   handler) simply find nothing left to act on — the same "already
+   released, message silently discarded" shape Stage 5 already established
+   for a stale `confirmNewGame`.
+2. **Symmetric release.** The forfeiting player's own session is released
+   exactly like the opponent's — both return to the lobby, neither is
+   treated specially for having initiated it, consistent with every prior
+   ended-series path.
+3. **Only while the current game is `"active"`.** Checked against
+   `GameState.status`, not `SeriesState.seriesStatus` — a forfeit attempt
+   in the gap between one game concluding and both players confirming the
+   next (series still `"active"`, current game already `"finished"`/
+   `"locked"`) is rejected, same error-response style every other
+   invalid-state action already uses. The project owner's own distinction:
+   single-game status gates ordinary play actions; series status gates
+   whether the series can still be forfeited at all — this stage only ever
+   needed the first, since a forfeit can't fake a win for an already-
+   decided game.
+4. **Symmetric `seriesEnded` reasons.** `opponentForfeited` to the winner,
+   `forfeited` to the one who gave up — distinguishable from each other and
+   from the existing `opponentDisconnected`/`seriesConcluded` reasons, so a
+   client can show "your opponent gave up" differently from "your
+   opponent vanished" or "the series ended normally."
+
+New `src/server/series.ts` function, `forfeitSeriesTo(series, winner)`:
+sets `seriesWinner`/`seriesStatus` directly, never runs through
+`settleGameOutcome`, never touches `gamesWon` — confirmed deliberately,
+per the design review's own finding: crediting the in-progress game first
+(then checking for 2 wins) would let a forfeit at 0-0 or 1-1 manufacture a
+win neither player actually finished playing. This judges the series
+directly, exactly like the existing disconnect-forfeit path already does.
+
+`server.ts` gained a shared `concludeSeries(seriesId, notifications)`
+function — pulled out once implementing this stage made it clear all
+three ways a series can end (disconnect-forfeit, ordinary-play conclusion,
+and this stage's explicit forfeit) needed the exact same sequence (tell
+whoever's owed a message, release every member's `SessionEntry`, remove
+the series from `seriesList`), not written three times with the risk of
+one copy drifting from the others. `reapAndSettleSeries` and the message
+handler's Stage-5 conclusion block were both rewired onto it, confirmed
+behaviorally identical by the full test suite passing unchanged before
+and after.
+
+Verified two ways, not just one: `pnpm check` (106 unit tests, up from
+103, including three new `forfeitSeriesTo` tests covering a 0-0 forfeit,
+a forfeit while leading or behind, and confirming the in-progress
+`GameState` object itself is never touched at all; 17 black-box `spec/`
+tests, including a new test confirming the symmetric reasons/score/session
+release, and cross-series isolation). And a real end-to-end scenario for
+the one gap not reachable over `spec/`'s own transport (same method Stage
+5 established): paired two real sessions, forced a board one move from
+lethal via direct SQLite edit, actually killed and restarted the server,
+let a real `play` message win game 1 for real (series at 1-0, still
+`"active"`), then sent `forfeitSeries` into that exact gap and confirmed —
+directly against the persisted SQLite row, not just the live response — it
+was rejected with an error, the series stayed `"active"` at exactly 1-0,
+and both sessions remained bound; then confirmed a fresh `confirmNewGame`
+reopened an active game 2, and `forfeitSeries` sent against THAT correctly
+worked, preserving the 1-0 score rather than crediting the forfeited game 2
+toward it.
+
+**Not touched, confirmed:** `src/game/engine.ts`, `src/game/types.ts` —
+zero rule changes. `client/app.js`/`client/index.html` — no debug-client UI
+added, consistent with this repo's own precedent that `requestQuit`/
+`rejectQuit` have never had UI either; purely a protocol/server-level
+feature verified through `spec/` and the manual script above. Production
+database: no clear, no migration, no deploy, no push.
+
 ## Not yet built
 
 The real client UI — the current one is a bare, unstyled debug page — and
@@ -940,14 +1030,9 @@ step added in Stage 3 is likewise bare — a single unstyled button.
 Stage 9's own decision (FIFO matchmaking, concurrent independent matches)
 is now fully implemented, verified, and documented — Stages 2, 3, 4a, 4b,
 4c, and 4d above complete that entire line of work. Stage 5 (best-of-three
-series lifecycle) is also now implemented and verified. Still not
-implemented:
-- The single-sided voluntary-quit action Stage 9 agreed to (immediately
-  awarding the series to the opponent, as distinct from the existing mutual
-  `requestQuit`/`rejectQuit`) — Stage 4b's forfeit-on-expiry settles the
-  *disconnection* case specifically; an explicit "I quit, you win" action
-  while both players are still connected is a different, not-yet-built
-  primitive.
+series lifecycle) and Stage 6 (unilateral series forfeit) are also now
+implemented and verified — every rule Stage 9 originally agreed to is
+built. Still not implemented:
 - The "continue this game vs. start a new game" redesign named back in
   Stage 8a — moot now that Stage 4b replaced the seat-refill model it was
   designed to gate: there is no freed seat to offer a choice about anymore,
@@ -959,8 +1044,8 @@ implemented:
   pre-Stage-5) — not yet authorized or done.
 
 Each further step gets its own explicit go-ahead before code changes, per
-this repo's own `CLAUDE.md` — Stages 2, 3, 4a, 4b, 4c, 4d, and 5 above were
-each reviewed read-only first, then implemented/verified only once
+this repo's own `CLAUDE.md` — Stages 2, 3, 4a, 4b, 4c, 4d, 5, and 6 above
+were each reviewed read-only first, then implemented/verified only once
 separately authorized, and the same applies to deploying any of them.
 
 This file is rewritten, not appended to, each time.

@@ -1,3 +1,4 @@
+import type { PlayerId } from "../game/types.ts";
 import type { SeriesState } from "./persistence.ts";
 
 // Confirmed with the project owner: a "locked" (drawn) game counts toward
@@ -56,4 +57,19 @@ export function settleGameOutcome(series: SeriesState): void {
   // simply over, not replayed).
   series.seriesStatus = "abandoned";
   series.seriesWinner = null;
+}
+
+// Stage 6: one player unilaterally concedes the WHOLE series to `winner` —
+// a different shape of event from settleGameOutcome above, not a variant of
+// it: this is never triggered by any GameState transition (the current
+// game's status is left completely untouched, exactly like Stage 4b's
+// disconnect-forfeit path — the engine never learns anything happened), and
+// it never credits the forfeited game toward gamesWon. Confirmed with the
+// project owner: crediting the in-progress game first (then checking for 2
+// wins) would let a forfeit at 0-0 or 1-1 manufacture a win neither player
+// actually played out — this instead judges the SERIES directly, the same
+// way a disconnect forfeit already does, regardless of the score coming in.
+export function forfeitSeriesTo(series: SeriesState, winner: PlayerId): void {
+  series.seriesWinner = winner;
+  series.seriesStatus = "finished";
 }

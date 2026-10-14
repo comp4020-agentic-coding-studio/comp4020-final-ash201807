@@ -21,11 +21,14 @@ player to win two games wins the match, win/draw scores carrying over from
 one game to the next within it. Either player can also end the current game
 early if the other agrees; unlike a normal win, that ends the whole match
 immediately with no winner, since there's no rule yet for fairly resuming a
-match after one of its games was called off. Any non-deciding game needs
-both players to confirm starting the next one — a rematch doesn't reset it
-out from under the other. The rules are fixed by a specification, four
-times revised after real two-player playtesting, agreed before this code
-was written; what to build on top was mine to decide.
+match after one of its games was called off. Either player can also
+unilaterally forfeit the whole match at any point during an active game,
+with no agreement needed — unlike the mutual case, this immediately awards
+the match to the opponent. Any non-deciding game needs both players to
+confirm starting the next one — a rematch doesn't reset it out from under
+the other. The rules are fixed by a specification, four times revised after
+real two-player playtesting, agreed before this code was written; what to
+build on top was mine to decide.
 
 ## What good means here
 
@@ -83,10 +86,15 @@ starting a match's next game resets the board and hands but never its
 running score, confirmed directly against the persisted data, not just the
 live broadcast; reaching a second win correctly ends the match rather than
 starting a third game, crediting whichever player actually reached two
-wins rather than whoever happened to win the most recent one; and
-voluntarily ending the current game early, including the other player
-rejecting that request, works end-to-end over the real transport —
-agreeing to end it ends the whole match, not just that one game. Checked in
+wins rather than whoever happened to win the most recent one; voluntarily
+ending the current game early, including the other player rejecting that
+request, works end-to-end over the real transport — agreeing to end it
+ends the whole match, not just that one game; and one player can
+unilaterally forfeit the whole match — the opponent wins outright, with no
+game credited as actually won or lost, the running score left exactly as
+it was, and the attempt is rejected (never silently accepted) if the
+current game has already concluded and both players are only waiting to
+confirm the next one. Checked in
 `src/game/engine.test.ts`, against the rules engine directly: AP costs, every
 Combo direction and type combination, damage and effect stacking (including
 Fire's own extra-damage effect, and its own lethal check separate from the

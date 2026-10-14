@@ -7,7 +7,7 @@ import type { GameState, PlayerId } from "../game/types.ts";
 import { parseSessionId, sessionCookieHeader } from "./cookies.ts";
 import { normalizeSeriesList, type Persistence, type SeriesState } from "./persistence.ts";
 import type { ClientMessage, ServerMessage, SeriesScore } from "./protocol.ts";
-import { settleGameOutcome } from "./series.ts";
+import { forfeitSeriesTo, settleGameOutcome } from "./series.ts";
 import {
   dequeuePair,
   enqueue,
@@ -131,6 +131,36 @@ export function createServer(persistence: Persistence, options: ServerOptions = 
     }
   }
 
+  // Stage 6: the one "a series has ended, tell whoever's owed a message,
+  // release every member's SessionEntry, remove the series itself" sequence,
+  // shared by all three ways a series can end (disconnect-forfeit below,
+  // ordinary-play conclusion, and the new explicit forfeitSeries) — pulled
+  // out once it became clear all three needed the exact same steps, not
+  // speculatively up front. `notifications` may be empty (both-disconnected
+  // abandonment: nobody left to tell) or name only a subset of the series'
+  // members (disconnect-forfeit: only the survivor is still connected to
+  // receive anything) — callers decide who gets told what, this just
+  // executes it. Collects nothing eagerly from `sockets`/`sessions` itself:
+  // each entry's own sessionId is resolved to its live socket (if any) at
+  // the moment it's processed, same order-independence reapAndSettleSeries's
+  // own prior comment already established ("deleting one must never change
+  // what the other's own lookup finds") — releasing one member's
+  // SessionEntry can't affect finding another's, since each is looked up by
+  // its own id, not by re-deriving the list mid-loop.
+  function concludeSeries(seriesId: string, notifications: Array<{ sessionId: string; message: ServerMessage }>): void {
+    for (const { sessionId: memberSessionId, message } of notifications) {
+      for (const [memberWs, sid] of sockets) {
+        if (sid === memberSessionId) {
+          send(memberWs, message);
+          sockets.delete(memberWs);
+          break;
+        }
+      }
+      appState.sessions = releaseSession(appState.sessions, memberSessionId);
+    }
+    delete appState.seriesList[seriesId];
+  }
+
   // Makes sure this browser has a session cookie, without claiming a seat or
   // a queue slot. Used for the plain HTTP page load — spec/'s own
   // health-check fetches (and a tutor's browser just reading /readme/) hit
@@ -186,20 +216,15 @@ export function createServer(persistence: Persistence, options: ServerOptions = 
       const remaining = sessionsInSeries(appState.sessions, seriesId);
       if (remaining.length === 2) continue; // only an unrelated session in this series expired
 
-      if (remaining.length === 1) {
-        const survivorSessionId = remaining[0];
-        for (const [ws, sid] of sockets) {
-          if (sid === survivorSessionId) {
-            send(ws, { type: "seriesEnded", reason: "opponentDisconnected" });
-            sockets.delete(ws);
-            break;
-          }
-        }
-        appState.sessions = releaseSession(appState.sessions, survivorSessionId);
-      }
-      // remaining.length === 0: both players gone, abandoned, nobody to notify.
-
-      delete appState.seriesList[seriesId];
+      // remaining.length === 1: the survivor wins by forfeit, notified.
+      // remaining.length === 0: both players gone, abandoned, nobody to
+      // notify — concludeSeries is called with an empty notification list,
+      // same "delete from seriesList, nothing else to do" effect.
+      const notifications =
+        remaining.length === 1
+          ? [{ sessionId: remaining[0], message: { type: "seriesEnded" as const, reason: "opponentDisconnected" as const } }]
+          : [];
+      concludeSeries(seriesId, notifications);
     }
 
     persistence.save(appState);
@@ -361,6 +386,41 @@ export function createServer(persistence: Persistence, options: ServerOptions = 
         if (!entry || !seriesId || !series || !game) return; // not seated in an active series; ignore game actions
 
         const seatedPlayer = entry.player;
+
+        if (message.type === "forfeitSeries") {
+          // Stage 6: unilateral — no mutual agreement, unlike requestQuit/
+          // rejectQuit. Only valid while the current game is active, same
+          // restriction requestQuit already has — once a game has already
+          // concluded and both players are only waiting to confirm the
+          // next one, there's no "forfeit the in-progress game" to make,
+          // only "forfeit the series outright" which this message already
+          // does regardless. Rejected with the same error style every
+          // other action uses for an invalid-state action.
+          if (game.status !== "active") {
+            send(ws, { type: "error", message: "cannot forfeit outside an active game" });
+            return;
+          }
+          const opponent = seatedPlayer === "A" ? "B" : "A";
+          // The in-progress GameState is deliberately left completely
+          // untouched — forfeiting judges the series directly (see
+          // series.ts's own comment), it never runs through
+          // settleGameOutcome, never touches gamesWon, never marks the
+          // current game itself concluded in any way.
+          forfeitSeriesTo(series, opponent);
+          const finalScore = seriesScore(series);
+          concludeSeries(seriesId, [
+            { sessionId, message: { type: "seriesEnded", reason: "forfeited", series: finalScore } },
+            ...sessionsInSeries(appState.sessions, seriesId)
+              .filter((id) => id !== sessionId)
+              .map((id) => ({
+                sessionId: id,
+                message: { type: "seriesEnded" as const, reason: "opponentForfeited" as const, series: finalScore },
+              })),
+          ]);
+          persistence.save(appState);
+          return;
+        }
+
         const statusBefore = game.status;
         try {
           if (message.type === "play") {
@@ -424,23 +484,14 @@ export function createServer(persistence: Persistence, options: ServerOptions = 
           // game's "abandoned" ended the whole series per the project
           // owner's decision) — both players are still connected here
           // (unlike the forfeit-on-disconnect path), so both get told
-          // directly, then both sessions are released so re-queuing is
-          // required, exactly like every other ended-series path. Collect
-          // both session ids BEFORE releasing either, same reasoning
-          // reapAndSettleSeries already follows: deleting one must never
-          // change what the other's own lookup finds.
+          // directly via the same concludeSeries sequence every other
+          // ended-series path already uses.
           const finishedScore = seriesScore(series);
-          for (const memberSessionId of sessionsInSeries(appState.sessions, seriesId)) {
-            for (const [memberWs, sid] of sockets) {
-              if (sid === memberSessionId) {
-                send(memberWs, { type: "seriesEnded", reason: "seriesConcluded", series: finishedScore });
-                sockets.delete(memberWs);
-                break;
-              }
-            }
-            appState.sessions = releaseSession(appState.sessions, memberSessionId);
-          }
-          delete appState.seriesList[seriesId];
+          const notifications = sessionsInSeries(appState.sessions, seriesId).map((memberSessionId) => ({
+            sessionId: memberSessionId,
+            message: { type: "seriesEnded" as const, reason: "seriesConcluded" as const, series: finishedScore },
+          }));
+          concludeSeries(seriesId, notifications);
           persistence.save(appState);
           return;
         }

@@ -43,6 +43,18 @@ export type ServerMessage =
   // still connected here) with the final score attached; both sessions are
   // released the moment this is sent, same "must explicitly re-queue" rule.
   | { type: "seriesEnded"; reason: "seriesConcluded"; series: SeriesScore }
+  // Stage 6: one player unilaterally forfeited the WHOLE series (ClientMessage
+  // "forfeitSeries" below) — sent to the OPPONENT, who just won the series
+  // without needing to agree to anything, mirroring the disconnect-forfeit
+  // case above in shape (both are "the other player's seat is gone, you win
+  // outright") but distinguished by reason, since "your opponent vanished"
+  // and "your opponent explicitly gave up" are different information for a
+  // player to receive. The forfeiting player gets their OWN confirmation —
+  // "forfeited", not "opponentForfeited" — of the same event; both sessions
+  // are released the moment this is sent either way, same as every other
+  // ended-series path.
+  | { type: "seriesEnded"; reason: "opponentForfeited"; series: SeriesScore }
+  | { type: "seriesEnded"; reason: "forfeited"; series: SeriesScore }
   | { type: "error"; message: string };
 
 export type ClientMessage =
@@ -57,4 +69,12 @@ export type ClientMessage =
   | { type: "endTurn" }
   | { type: "confirmNewGame" }
   | { type: "requestQuit" }
-  | { type: "rejectQuit" };
+  | { type: "rejectQuit" }
+  // Stage 6: unilateral — no agreement from the opponent needed, unlike
+  // requestQuit/rejectQuit's mutual shape. Immediately awards the WHOLE
+  // series to the opponent, exactly like Stage 4b's disconnect-forfeit, just
+  // triggered by this message instead of a grace period elapsing. Only valid
+  // while the series' CURRENT game is active (src/server/server.ts's own
+  // guard) — rejected, same as any other action, once that game has already
+  // concluded and both players are only waiting to confirm the next one.
+  | { type: "forfeitSeries" };
