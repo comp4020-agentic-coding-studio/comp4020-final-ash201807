@@ -104,6 +104,9 @@ finished/locked game, or controlling which cards complete a Combo, isn't
 practical live, so these are checked where that control exists.
 
 Judged, not checked: whether the board is genuinely legible at a glance
-(point 3) — the debug client renders state correctly but doesn't try to look
-clear, since visual design is a later stage. Whether two people enjoy
-playing it is likewise not something a test can answer.
+(point 3) — the client shows whose turn it is, HP, AP, series score,
+connection state, and action feedback directly rather than only in a debug
+log, verified with two independent browser sessions playing a real game
+end to end, but it's still a functional layout with no visual design pass.
+Whether two people enjoy playing it is likewise not something a test can
+answer.

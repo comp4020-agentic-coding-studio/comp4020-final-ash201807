@@ -13,6 +13,12 @@ export interface SeriesScore {
 }
 
 export type ServerMessage =
+  // Stage 1 (authorization/logging hardening): sent once, right after a
+  // WebSocket connection is established, independent of whether the session
+  // ends up seated/queued/new — a purely cosmetic/log-correlation handle (see
+  // identity.ts), never used by the server itself to decide anything. Never
+  // carries the real sessionId.
+  | { type: "identity"; displayId: string }
   | { type: "assigned"; player: PlayerId }
   | { type: "waiting" }
   // Stage 3: distinct from "waiting" on purpose, per the project owner's own

@@ -5,6 +5,8 @@ import { WebSocketServer, type WebSocket } from "ws";
 import { confirmNewGame, createInitialState, drawCard, endTurn, playCard, rejectQuit, requestQuit } from "../game/engine.ts";
 import type { GameState, PlayerId } from "../game/types.ts";
 import { parseSessionId, sessionCookieHeader } from "./cookies.ts";
+import { displayIdFor } from "./identity.ts";
+import { logEvent } from "./log.ts";
 import { normalizeSeriesList, type Persistence, type SeriesState } from "./persistence.ts";
 import type { ClientMessage, ServerMessage, SeriesScore } from "./protocol.ts";
 import { forfeitSeriesTo, settleGameOutcome } from "./series.ts";
@@ -220,6 +222,11 @@ export function createServer(persistence: Persistence, options: ServerOptions = 
       // remaining.length === 0: both players gone, abandoned, nobody to
       // notify — concludeSeries is called with an empty notification list,
       // same "delete from seriesList, nothing else to do" effect.
+      if (remaining.length === 1) {
+        logEvent({ event: "series_forfeited_disconnect", seriesId, displayId: displayIdFor(remaining[0]) });
+      } else {
+        logEvent({ event: "series_abandoned_both_disconnected", seriesId });
+      }
       const notifications =
         remaining.length === 1
           ? [{ sessionId: remaining[0], message: { type: "seriesEnded" as const, reason: "opponentDisconnected" as const } }]
@@ -264,6 +271,13 @@ export function createServer(persistence: Persistence, options: ServerOptions = 
         }
       }
 
+      logEvent({
+        event: "series_paired",
+        seriesId,
+        displayIdA: displayIdFor(first),
+        displayIdB: displayIdFor(second),
+      });
+
       persistence.save(appState);
       broadcastState(seriesId);
     }
@@ -291,6 +305,7 @@ export function createServer(persistence: Persistence, options: ServerOptions = 
       if (existing.disconnectedAt !== null) {
         appState.sessions = { ...appState.sessions, [sessionId]: { ...existing, disconnectedAt: null } };
         persistence.save(appState);
+        logEvent({ event: "session_reconnected", displayId: displayIdFor(sessionId), seriesId: existing.seriesId ?? undefined });
       }
       return { sessionId, status: "seated", player: existing.player };
     }
@@ -337,6 +352,8 @@ export function createServer(persistence: Persistence, options: ServerOptions = 
     }
     wss.handleUpgrade(req, socket, head, (ws) => {
       const { sessionId, status, player } = resolveSession(req);
+      const displayId = displayIdFor(sessionId);
+      send(ws, { type: "identity", displayId });
 
       if (status === "seated") {
         sockets.set(ws, sessionId);
@@ -374,6 +391,7 @@ export function createServer(persistence: Persistence, options: ServerOptions = 
           appState.queue = enqueue(appState.queue, sessionId);
           queuedSockets.set(sessionId, ws);
           persistence.save(appState);
+          logEvent({ event: "joined_queue", displayId });
           send(ws, { type: "queued" });
           pumpQueue();
           return;
@@ -397,6 +415,13 @@ export function createServer(persistence: Persistence, options: ServerOptions = 
           // does regardless. Rejected with the same error style every
           // other action uses for an invalid-state action.
           if (game.status !== "active") {
+            logEvent({
+              event: "action_rejected",
+              displayId,
+              seriesId,
+              action: "forfeitSeries",
+              reason: "cannot forfeit outside an active game",
+            });
             send(ws, { type: "error", message: "cannot forfeit outside an active game" });
             return;
           }
@@ -407,6 +432,7 @@ export function createServer(persistence: Persistence, options: ServerOptions = 
           // settleGameOutcome, never touches gamesWon, never marks the
           // current game itself concluded in any way.
           forfeitSeriesTo(series, opponent);
+          logEvent({ event: "series_forfeited_explicit", seriesId, displayId });
           const finalScore = seriesScore(series);
           concludeSeries(seriesId, [
             { sessionId, message: { type: "seriesEnded", reason: "forfeited", series: finalScore } },
@@ -465,9 +491,12 @@ export function createServer(persistence: Persistence, options: ServerOptions = 
             throw new Error("unknown message type");
           }
         } catch (err) {
-          send(ws, { type: "error", message: err instanceof Error ? err.message : "invalid action" });
+          const reason = err instanceof Error ? err.message : "invalid action";
+          logEvent({ event: "action_rejected", displayId, seriesId, action: message.type, reason });
+          send(ws, { type: "error", message: reason });
           return;
         }
+        logEvent({ event: "action_accepted", displayId, seriesId, action: message.type });
 
         // The game this action acted on just concluded (it wasn't already
         // concluded before this action — confirmNewGame's own "cannot start
@@ -487,6 +516,12 @@ export function createServer(persistence: Persistence, options: ServerOptions = 
           // directly via the same concludeSeries sequence every other
           // ended-series path already uses.
           const finishedScore = seriesScore(series);
+          logEvent({
+            event: "series_concluded",
+            seriesId,
+            seriesStatus: finishedScore.seriesStatus,
+            seriesWinner: finishedScore.seriesWinner,
+          });
           const notifications = sessionsInSeries(appState.sessions, seriesId).map((memberSessionId) => ({
             sessionId: memberSessionId,
             message: { type: "seriesEnded" as const, reason: "seriesConcluded" as const, series: finishedScore },
@@ -509,6 +544,7 @@ export function createServer(persistence: Persistence, options: ServerOptions = 
         if (appState.queue.includes(sessionId)) {
           appState.queue = removeFromQueue(appState.queue, sessionId);
           persistence.save(appState);
+          logEvent({ event: "queue_left_on_disconnect", displayId });
           return;
         }
 
@@ -525,6 +561,11 @@ export function createServer(persistence: Persistence, options: ServerOptions = 
           // gap, multi-tab usage was never in scope for this app.
           appState.sessions = markDisconnected(appState.sessions, sessionId, Date.now());
           persistence.save(appState);
+          logEvent({
+            event: "session_disconnected",
+            displayId,
+            seriesId: appState.sessions[sessionId]?.seriesId ?? undefined,
+          });
         }
       });
     });

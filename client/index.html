@@ -3,23 +3,166 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Card Board Game (debug client)</title>
+    <title>Card Board Game</title>
+    <style>
+      /* Minimal, functional layout only — legibility, not visual polish.
+         Per the stage 3 brief: "CSS美化、动画和复杂视觉效果不是本阶段目标". */
+      body {
+        font-family: system-ui, sans-serif;
+        max-width: 640px;
+        margin: 0 auto;
+        padding: 1rem;
+      }
+      #identity {
+        color: #555;
+        font-size: 0.9rem;
+      }
+      #disconnect-banner,
+      #error-banner {
+        display: none;
+        padding: 0.6rem 1rem;
+        border-radius: 4px;
+        margin: 0.5rem 0;
+        font-weight: bold;
+      }
+      #disconnect-banner {
+        background: #5a1a1a;
+        color: #fff;
+      }
+      #error-banner {
+        background: #7a4b00;
+        color: #fff;
+      }
+      #status-line {
+        font-size: 1.1rem;
+        margin: 0.75rem 0;
+      }
+      #series-score {
+        font-size: 0.95rem;
+        color: #333;
+      }
+      #hp-ap-row {
+        display: flex;
+        gap: 1.5rem;
+        margin: 0.5rem 0;
+        font-variant-numeric: tabular-nums;
+      }
+      #board {
+        display: inline-grid;
+        gap: 2px;
+        margin: 0.75rem 0;
+      }
+      #board button {
+        width: 52px;
+        height: 52px;
+        font-size: 0.8rem;
+      }
+      #hand button,
+      #opponent-hand .card-back {
+        width: 60px;
+        height: 36px;
+        margin-right: 4px;
+        margin-bottom: 4px;
+      }
+      #opponent-hand .card-back {
+        display: inline-block;
+        background: #ccc;
+        border: 1px solid #888;
+        border-radius: 3px;
+      }
+      .action-row {
+        margin: 0.75rem 0;
+      }
+      .action-row button {
+        margin-right: 0.5rem;
+      }
+      button:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+      #quit-panel {
+        border: 1px solid #999;
+        padding: 0.5rem;
+        margin: 0.5rem 0;
+        display: none;
+      }
+      #newgame-panel {
+        border: 1px solid #999;
+        padding: 0.5rem;
+        margin: 0.5rem 0;
+        display: none;
+      }
+      details#log-details {
+        margin-top: 1.5rem;
+        color: #555;
+      }
+      #log {
+        font-size: 0.75rem;
+        max-height: 150px;
+        overflow-y: auto;
+        background: #f5f5f5;
+        padding: 0.5rem;
+      }
+    </style>
   </head>
   <body>
     <main>
-      <h1>Card Board Game — debug client</h1>
+      <h1>Card Board Game</h1>
       <p><a href="/readme/">About this app</a></p>
-      <p id="status">connecting...</p>
-      <p><button id="joinqueue-btn">Join queue</button></p>
-      <div id="board"></div>
-      <p>Hand (click to select, then click a board cell):</p>
-      <div id="hand"></div>
-      <p>
-        <button id="draw-btn">Draw</button>
-        <button id="endturn-btn">End Turn</button>
-        <button id="newgame-btn">New Game</button>
-      </p>
-      <pre id="log"></pre>
+      <p id="identity">connecting…</p>
+
+      <div id="disconnect-banner">Connection lost. Reload this page to reconnect — your place is saved.</div>
+      <div id="error-banner"></div>
+
+      <section id="lobby-panel">
+        <p id="status-line">Connecting…</p>
+        <button id="joinqueue-btn" style="display: none">Join queue</button>
+      </section>
+
+      <section id="game-panel" style="display: none">
+        <p id="series-score"></p>
+        <div id="hp-ap-row">
+          <span id="my-hp"></span>
+          <span id="opp-hp"></span>
+          <span id="ap-display"></span>
+        </div>
+        <p id="turn-indicator"></p>
+
+        <div id="board"></div>
+
+        <p>Opponent's hand (<span id="opp-hand-count">0</span> cards):</p>
+        <div id="opponent-hand"></div>
+
+        <p>Your hand (click a card, then click a board cell to play it):</p>
+        <div id="hand"></div>
+
+        <div class="action-row">
+          <button id="draw-btn">Draw</button>
+          <button id="endturn-btn">End Turn</button>
+        </div>
+
+        <div id="quit-panel">
+          <p id="quit-status"></p>
+          <button id="requestquit-btn">Offer to end game early</button>
+          <button id="cancelquit-btn" style="display: none">Cancel my offer</button>
+          <button id="acceptquit-btn" style="display: none">Accept — end game early</button>
+          <button id="declinequit-btn" style="display: none">Decline</button>
+        </div>
+
+        <div class="action-row">
+          <button id="forfeit-btn">Forfeit whole match</button>
+        </div>
+
+        <div id="newgame-panel">
+          <p id="newgame-status"></p>
+          <button id="newgame-btn">Ready for next game</button>
+        </div>
+      </section>
+
+      <details id="log-details">
+        <summary>Debug log</summary>
+        <pre id="log"></pre>
+      </details>
     </main>
     <script src="/app.js"></script>
   </body>

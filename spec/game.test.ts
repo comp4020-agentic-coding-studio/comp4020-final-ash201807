@@ -61,7 +61,8 @@ interface SeriesScore {
 }
 
 interface ServerMessage {
-  type: "assigned" | "waiting" | "queued" | "state" | "seriesEnded" | "error";
+  type: "identity" | "assigned" | "waiting" | "queued" | "state" | "seriesEnded" | "error";
+  displayId?: string;
   player?: "A" | "B";
   reason?: string;
   state?: {
@@ -110,6 +111,19 @@ function wait(ms: number): Promise<void> {
 
 function lastState(messages: ServerMessage[]) {
   return messages.filter((m) => m.type === "state").at(-1)?.state;
+}
+
+// Stage 1 (authorization/logging hardening): the server now sends an
+// "identity" message immediately on every connection, before anything else —
+// it's cosmetic/log-correlation only (see src/server/identity.ts), never a
+// seat assignment, but it does mean "the first message a socket receives" is
+// no longer necessarily meaningful the way "assigned"/"queued" used to be.
+// Tests that assert on "the first substantive message" filter it out here
+// rather than hardcoding messages[0], so they keep checking the same thing
+// (what's the first message that actually says something about this
+// session's seat) without being tied to exactly where "identity" lands.
+function withoutIdentity(messages: ServerMessage[]): ServerMessage[] {
+  return messages.filter((m) => m.type !== "identity");
 }
 
 // Connects, sends the explicit joinQueue action, and waits for it to take
@@ -206,7 +220,7 @@ it("resumes the same game for a reconnecting session instead of losing it", asyn
   const aAgain = await connect(cookieA);
   await wait(200);
 
-  expect(aAgain.messages[0]).toEqual({ type: "assigned", player: "A" });
+  expect(withoutIdentity(aAgain.messages)[0]).toEqual({ type: "assigned", player: "A" });
   const resumedState = lastState(aAgain.messages);
   expect(resumedState).toBeDefined();
   expect(resumedState?.currentPlayer).toBe(beforeReconnect.currentPlayer);
@@ -368,7 +382,7 @@ it("reconnects a session to its own series, not an unrelated concurrent one", as
   const oneAAgain = await connect(one.cookieA);
   await wait(200);
 
-  expect(oneAAgain.messages[0]).toEqual({ type: "assigned", player: "A" });
+  expect(withoutIdentity(oneAAgain.messages)[0]).toEqual({ type: "assigned", player: "A" });
   const resumedState = lastState(oneAAgain.messages);
   expect(resumedState).toBeDefined();
   expect(resumedState?.currentPlayer).toBe(beforeReconnect.currentPlayer);
@@ -533,6 +547,113 @@ it("lets one player unilaterally forfeit the WHOLE series, awarding it to the op
   match.b.ws.close();
   unrelated.a.ws.close();
   unrelated.b.ws.close();
+  await wait(200);
+});
+
+// --- Stage 2 (authorization/logging hardening): new authorization tests ----
+
+it("ignores a forged player/playerId field — the acting seat is always resolved from the real connection, never the message body", async () => {
+  const match = await formAPairing();
+  const unrelated = await formAPairing();
+
+  const state = lastState(match.a.messages);
+  if (!state) throw new Error("expected a state after pairing");
+  // The socket that is NOT allowed to act right now, per the real server-side
+  // turn order.
+  const outOfTurnClient = state.currentPlayer === "A" ? match.b : match.a;
+  const outOfTurnSeat = state.currentPlayer === "A" ? "B" : "A";
+  const legitimateSeat = state.currentPlayer;
+
+  const messageCountBefore = outOfTurnClient.messages.length;
+  const unrelatedACountBefore = unrelated.a.messages.length;
+  const unrelatedBCountBefore = unrelated.b.messages.length;
+
+  // Sent from the wrong socket, but claiming — via extra fields the protocol
+  // doesn't even declare (see protocol.ts's ClientMessage: no variant has a
+  // player/playerId field) — to be the legitimate current player.
+  send(outOfTurnClient.ws, { type: "draw", player: legitimateSeat, playerId: legitimateSeat });
+  await wait(200);
+
+  const newMessages = outOfTurnClient.messages.slice(messageCountBefore);
+  expect(newMessages).toHaveLength(1);
+  expect(newMessages[0].type).toBe("error");
+  // Identical rejection reason to the plain out-of-turn case (the earlier
+  // "enforces turn order" test, with no forged fields at all) — the forged
+  // fields changed nothing about the outcome, confirming the server never
+  // even looks at them to decide who's acting.
+  expect(newMessages[0].message).toMatch(/turn/);
+
+  // The legitimate seat's own hand/AP is completely unaffected — no draw was
+  // actually applied to anyone, since the message was rejected outright, not
+  // partially honored.
+  const afterState = lastState(match.a.messages);
+  expect(afterState?.currentPlayer).toBe(legitimateSeat);
+  expect(afterState?.ap).toBe(state.ap);
+  expect(afterState?.players[outOfTurnSeat]).toEqual(state.players[outOfTurnSeat]);
+
+  // An unrelated concurrent series receives nothing as a side effect.
+  expect(unrelated.a.messages.slice(unrelatedACountBefore)).toHaveLength(0);
+  expect(unrelated.b.messages.slice(unrelatedBCountBefore)).toHaveLength(0);
+
+  match.a.ws.close();
+  match.b.ws.close();
+  unrelated.a.ws.close();
+  unrelated.b.ws.close();
+  await wait(200);
+});
+
+it("silently discards a game message from an already-released session, without reviving or mutating its old series", async () => {
+  const match = await formAPairing();
+  const unrelated = await formAPairing();
+
+  // Release both of match's sessions via the existing, already-verified
+  // unilateral forfeit path (Stage 6) — the simplest deterministic way to
+  // reach "a session whose SessionEntry has been deleted, while its socket
+  // is still technically open" without waiting out a real disconnect grace
+  // period.
+  send(match.a.ws, { type: "forfeitSeries" });
+  await wait(200);
+  expect(match.a.messages).toContainEqual(expect.objectContaining({ type: "seriesEnded", reason: "forfeited" }));
+  expect(match.b.messages).toContainEqual(expect.objectContaining({ type: "seriesEnded", reason: "opponentForfeited" }));
+
+  const aCountBefore = match.a.messages.length;
+  const bCountBefore = match.b.messages.length;
+  const unrelatedACountBefore = unrelated.a.messages.length;
+  const unrelatedBCountBefore = unrelated.b.messages.length;
+
+  // Both sockets are still open (never closed), but their SessionEntry is
+  // gone — per docs/authorization.md, this hits the `!entry` guard in
+  // server.ts and the message is discarded, not errored (this repo's
+  // established convention for a session the server no longer recognizes).
+  send(match.a.ws, { type: "draw" });
+  send(match.b.ws, { type: "endTurn" });
+  await wait(200);
+
+  // Neither released socket receives anything at all in response — no error,
+  // no state, nothing. A real error response here would mean the server was
+  // still treating this as a live, seated session.
+  expect(match.a.messages.slice(aCountBefore)).toHaveLength(0);
+  expect(match.b.messages.slice(bCountBefore)).toHaveLength(0);
+
+  // The unrelated, still-active concurrent series is completely undisturbed
+  // by a stale message against a dead series — cross-series isolation holds
+  // even for a released session's leftover messages, not just live ones.
+  expect(unrelated.a.messages.slice(unrelatedACountBefore)).toHaveLength(0);
+  expect(unrelated.b.messages.slice(unrelatedBCountBefore)).toHaveLength(0);
+  expect(lastState(unrelated.a.messages)?.status).toBe("active");
+
+  // A fresh pairing can still form cleanly afterward — the released session
+  // ids aren't left in some half-cleaned-up state that would corrupt a new
+  // series reusing the same queue.
+  const fresh = await formAPairing();
+  expect(lastState(fresh.a.messages)?.status).toBe("active");
+
+  match.a.ws.close();
+  match.b.ws.close();
+  unrelated.a.ws.close();
+  unrelated.b.ws.close();
+  fresh.a.ws.close();
+  fresh.b.ws.close();
   await wait(200);
 });
 

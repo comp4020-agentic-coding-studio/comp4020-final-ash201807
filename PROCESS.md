@@ -1020,19 +1020,161 @@ added, consistent with this repo's own precedent that `requestQuit`/
 feature verified through `spec/` and the manual script above. Production
 database: no clear, no migration, no deploy, no push.
 
-## Not yet built
+## Crit 10 — authorization documentation, anonymous display identity, structured logging, a real client UI
 
-The real client UI — the current one is a bare, unstyled debug page — and
-the Expansion/Board-Locked/New-Game/voluntary-termination surfaced in it;
-`quitRequested` specifically has no UI at all yet. The lobby/join-queue
-step added in Stage 3 is likewise bare — a single unstyled button.
+Directed by a five-stage plan from the project owner (Stage 0 read-only, then
+Stages 1-5 each individually authorized before any code changed), aimed
+squarely at `crits/10-fly-by-instruments`'s own requirements: server-side
+permission checks written down with why, server-side logging of who did
+what that outlives the crit, and a client two strangers can actually use
+from the URL alone while the developer narrates from logs rather than
+clicking through the UI.
+
+### Stage 0 — read-only verification against the course's own text
+
+Before writing anything, fetched the actual crit rubric text rather than
+assuming it: `crits/10-fly-by-instruments`'s spec literally requires
+"what each person may see and change is checked on the server, and that
+decision is written down in the repo with why" and "your final project logs
+who did what, server-side, and the logging outlives the crit." One thing the
+rubric does NOT settle precisely: whether "outlives the crit" requires this
+app's own persistence layer for log history, or is satisfied by Fly's own
+log aggregation (`flyctl logs`) reading this process' stdout. Flagged
+explicitly as not fully verifiable from the course text rather than silently
+picking the stricter (and more invasive) reading — the decision taken was
+stdout JSON, on the basis that building a persistence layer for something
+the rubric doesn't clearly require would cost schema risk against the one
+thing this repo is already careful about (`/data/game.db`) for no confirmed
+benefit. Also confirmed, by reading `server.ts` before writing any
+authorization test: the server already never reads a client-submitted
+identity field to decide who's acting — `seatedPlayer` always comes from
+`entry.player`, resolved from the connection's own cookie, never from the
+message body. This shaped Stage 2's tests to confirm an existing property
+rather than drive new server code.
+
+### Stage 1 — authorization doc, anonymous display IDs, structured logging
+
+`docs/authorization.md` (new): describes, with a citation to the actual code
+path for every claim, how a connection becomes a session (`cookies.ts`'s
+HttpOnly `session_id`), how the server resolves "who is acting" (always
+`entry.player` off the connection's own session, never anything in the
+message body — `ClientMessage`'s own type has no player/identity field on
+any variant for a client to even put one in), what each session may do, how
+cross-series isolation holds, how illegal/expired/released-session messages
+are handled (silently discarded via the existing `!entry` guard, not
+errored — this repo's established convention), and the model's known limits
+(cookie theft, multi-tab, display-ID collisions).
+
+`src/server/identity.ts` (new): `displayIdFor(sessionId)` —
+`sha256(sessionId).hex().slice(0, 8)`, a pure one-way function. Deliberately
+never persisted (no `SessionEntry`/`AppState`/SQLite field) — it's
+recomputed on demand from the already-persisted `sessionId`, so there's
+nothing new to migrate or keep in sync. `protocol.ts` gained
+`{type: "identity", displayId}`, sent once per connection, before any
+seat-related message — confirmed never read by the server itself to
+authorize anything, confirmed same session always yields the same
+`displayId` across a reconnect (verified against a real running server, not
+just by reading the hash function's own determinism).
+
+`src/server/log.ts` (new): `logEvent()`, one line of JSON to stdout per
+call. Wired into `server.ts` at every point the rubric's "who did what"
+actually happens: `joined_queue`, `series_paired`, `action_accepted`,
+`action_rejected` (with the real rejection reason), `session_disconnected`,
+`session_reconnected`, `queue_left_on_disconnect`,
+`series_forfeited_disconnect`, `series_abandoned_both_disconnected`,
+`series_forfeited_explicit`, `series_concluded`. Every event carries
+`displayId`/`seriesId` where applicable, never a cookie or raw `sessionId` —
+checked explicitly before this stage was called done, not assumed.
+
+Adding `identity` as the first message on every connection broke three
+existing `spec/game.test.ts` assertions that hardcoded `messages[0]` to be
+`assigned` — a real regression, not a flaky test. Fixed by filtering out
+`identity` before asserting "the first substantive message," preserving
+every original assertion's intent rather than loosening it. Verified: full
+`pnpm check` (106 engine tests, 17 black-box tests, all passing) before and
+after, plus manual real-WebSocket verification of the forged-identity
+rejection, reconnect-same-`displayId`, and the exact stdout JSON shape
+(all against a scratch local server/DB, deleted after).
+
+### Stage 2 — two new authorization black-box tests
+
+Both added to `spec/game.test.ts`, using the file's own existing
+conventions (no new test framework, no reach into the engine directly):
+
+- **Forged identity field.** The out-of-turn socket sends `draw` with a
+  `player`/`playerId` field claiming to be the legitimate current player.
+  Confirmed: identical rejection to the plain out-of-turn case with no
+  forged fields at all, the legitimate player's hand/AP/turn completely
+  unaffected, and an unrelated concurrent series undisturbed. This test
+  found no bug — exactly as Stage 0's read of `server.ts` predicted, since
+  `ClientMessage` has no field for a forged identity to even occupy.
+- **Message from an already-released session.** Released both sessions of a
+  pairing via the existing (already-verified) `forfeitSeries` path — faster
+  and more deterministic than waiting out a real disconnect grace period —
+  then sent `draw`/`endTurn` on the still-open-but-unseated sockets.
+  Confirmed: no response at all (matching `docs/authorization.md`'s own
+  description of the `!entry` discard path, not an error response), the
+  unrelated concurrent series undisturbed, and a fresh pairing still forms
+  cleanly afterward.
+
+19/19 black-box tests passing (17 existing + 2 new), engine suite unchanged
+at 106. No vulnerability found; nothing beyond this file was touched.
+
+### Stage 3 — a real client UI
+
+Full rewrite of `client/index.html`/`client/app.js` — still plain JS, no
+build step, no framework, consistent with this repo's existing stack
+decision. Functional layout only, no visual design pass (explicitly out of
+scope for this stage): identity display, a persistent disconnect banner (not
+just a `console.log`), a timed error banner surfacing the server's actual
+rejection message, separate lobby/game panels, HP/AP/turn/series-score
+display, opponent-hand card backs (count only, never content), and UI for
+every protocol action that previously had none at all —
+`requestQuit`/`rejectQuit` (previously zero UI, per the prior version of
+this file's own "Not yet built" note) and `forfeitSeries` (previously
+server/protocol-only, verified only through `spec/` and a manual script).
+
+The client still computes nothing about legality — board cells and hand
+cards disable based on the server's last-pushed `state.currentPlayer`/
+`state.status` purely to avoid sending a request that can only fail; the
+server rejects an illegal action regardless, confirmed unchanged by the
+full black-box suite passing with zero server-side changes this stage.
+
+Verified with two fully independent browser instances and contexts (no
+shared cookies/storage, the same isolation real separate Chrome profiles
+give), driven by a throwaway Playwright script kept outside this repo and
+deleted after use: distinct display identities; joining the queue from a
+fresh page load alone reaches a shared game; realtime-synced board state
+after a play; opponent hand shown as backs only; an out-of-turn action
+(forced past the UI's own disable, simulating a race) surfaces the server's
+real rejection in the visible error banner; `requestQuit`/accept and
+`forfeitSeries` both resolve end-to-end with the correct distinct message
+shown to each side. `pnpm check` (106 + 19 tests) passing before and after,
+confirming zero regressions from a purely client-side rewrite.
+
+**Known gap, not resolved here:** the `locked` (full-board draw) status
+branch in the new UI is implemented against the protocol's own type
+(`GameState.status`) but not exercised end-to-end — reaching that state
+through real random play isn't practical to script, the same
+already-established limitation `engine.test.ts`/`spec/`'s own comments note
+elsewhere in this file for other states.
+
+**Not touched by Stages 0-3:** `src/game/engine.ts`, `src/game/types.ts`,
+`src/server/sessions.ts`, FIFO matchmaking, series lifecycle, disconnect
+grace periods, restart recovery, persistence schema. No production
+database contact. No commit, no push, no deploy.
+
+## Not yet built
 
 Stage 9's own decision (FIFO matchmaking, concurrent independent matches)
 is now fully implemented, verified, and documented — Stages 2, 3, 4a, 4b,
 4c, and 4d above complete that entire line of work. Stage 5 (best-of-three
 series lifecycle) and Stage 6 (unilateral series forfeit) are also now
 implemented and verified — every rule Stage 9 originally agreed to is
-built. Still not implemented:
+built. The crit-10 work above (authorization docs, anonymous display IDs,
+structured logging, a real client UI covering Expansion/Board-Locked/
+New-Game/voluntary-termination/forfeit) closes the "Not yet built" gap this
+file previously recorded for the client. Still not implemented:
 - The "continue this game vs. start a new game" redesign named back in
   Stage 8a — moot now that Stage 4b replaced the seat-refill model it was
   designed to gate: there is no freed seat to offer a choice about anymore,
@@ -1042,10 +1184,14 @@ built. Still not implemented:
   `queue` field, pre-Stage-2/3; `series`/no keying, pre-Stage-4b;
   `SeriesState` missing `gamesWon`/`seriesWinner`/`seriesStatus`,
   pre-Stage-5) — not yet authorized or done.
+- The Board-Locked UI branch is implemented but unverified end-to-end (see
+  crit-10 Stage 3 above) — same already-established limitation as reaching
+  that state in any other automated check in this repo.
 
 Each further step gets its own explicit go-ahead before code changes, per
-this repo's own `CLAUDE.md` — Stages 2, 3, 4a, 4b, 4c, 4d, 5, and 6 above
-were each reviewed read-only first, then implemented/verified only once
-separately authorized, and the same applies to deploying any of them.
+this repo's own `CLAUDE.md` — Stages 2, 3, 4a, 4b, 4c, 4d, 5, 6, and the
+crit-10 Stages 0-3 above were each reviewed read-only first, then
+implemented/verified only once separately authorized, and the same applies
+to deploying any of them.
 
 This file is rewritten, not appended to, each time.
