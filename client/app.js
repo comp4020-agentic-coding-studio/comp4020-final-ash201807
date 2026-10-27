@@ -38,6 +38,8 @@ const newGamePanel = document.getElementById("newgame-panel");
 const newGameStatusEl = document.getElementById("newgame-status");
 const newGameBtn = document.getElementById("newgame-btn");
 const logEl = document.getElementById("log");
+const connectionStatusEl = document.getElementById("connection-status");
+const connectionStatusTextEl = document.getElementById("connection-status-text");
 
 // B1: a single, fixed pixel-art pattern for every opponent card back,
 // regardless of what's actually in their hand — the server never tells this
@@ -56,69 +58,17 @@ const OPPONENT_CARD_BACK_SVG = `
   </svg>
 `;
 
-// B2: one fixed pixel-art glyph per CardType, purely decorative (the
-// button's own text — the full word "fire"/"lightning"/"water"/"nature" —
-// is what actually gives it an accessible name, see renderHand below) —
-// aria-hidden/focusable=false for the same reason B1's card-back SVG uses
-// them. All four share one 16x16 pixel grid (2px cells) and the same single
-// fill colour (--color-primary, no new token), so type is told apart by
-// silhouette alone, matching this stage's own colour-token constraint.
+// C2: one fixed pixel-art glyph per CardType, purely decorative — the
+// button's own text (the full card-type word) or, on the board, the cell's
+// aria-label is what carries the accessible name. 12x12 grid drawn as
+// outline / fill / highlight so each reads as a small illustration, not a
+// flat symbol; warm tones (fire, lightning) vs cool (water, nature), all
+// from existing colour tokens. Generated from ASCII pixel maps.
 const CARD_TYPE_ICONS = {
-  fire: `
-    <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
-      <rect x="7" y="1" width="2" height="2" fill="var(--color-primary)" />
-      <rect x="6" y="3" width="4" height="2" fill="var(--color-primary)" />
-      <rect x="5" y="5" width="2" height="2" fill="var(--color-primary)" />
-      <rect x="9" y="5" width="2" height="2" fill="var(--color-primary)" />
-      <rect x="5" y="7" width="6" height="2" fill="var(--color-primary)" />
-      <rect x="4" y="9" width="8" height="2" fill="var(--color-primary)" />
-      <rect x="5" y="11" width="6" height="2" fill="var(--color-primary)" />
-      <rect x="6" y="13" width="4" height="2" fill="var(--color-primary)" />
-    </svg>
-  `,
-  lightning: `
-    <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
-      <rect x="9" y="1" width="3" height="2" fill="var(--color-primary)" />
-      <rect x="7" y="3" width="3" height="2" fill="var(--color-primary)" />
-      <rect x="5" y="5" width="3" height="2" fill="var(--color-primary)" />
-      <rect x="3" y="7" width="5" height="2" fill="var(--color-primary)" />
-      <rect x="6" y="9" width="3" height="2" fill="var(--color-primary)" />
-      <rect x="8" y="11" width="3" height="2" fill="var(--color-primary)" />
-      <rect x="6" y="13" width="3" height="2" fill="var(--color-primary)" />
-    </svg>
-  `,
-  water: `
-    <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
-      <rect x="7" y="1" width="2" height="2" fill="var(--color-primary)" />
-      <rect x="6" y="3" width="4" height="2" fill="var(--color-primary)" />
-      <rect x="5" y="5" width="6" height="2" fill="var(--color-primary)" />
-      <rect x="4" y="7" width="8" height="2" fill="var(--color-primary)" />
-      <rect x="4" y="9" width="8" height="2" fill="var(--color-primary)" />
-      <rect x="5" y="11" width="6" height="2" fill="var(--color-primary)" />
-      <rect x="6" y="13" width="4" height="2" fill="var(--color-primary)" />
-    </svg>
-  `,
-  nature: `
-    <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
-      <rect x="10" y="1" width="2" height="2" fill="var(--color-primary)" />
-      <rect x="8" y="3" width="4" height="2" fill="var(--color-primary)" />
-      <rect x="6" y="5" width="4" height="2" fill="var(--color-primary)" />
-      <rect x="4" y="7" width="4" height="2" fill="var(--color-primary)" />
-      <rect x="4" y="9" width="4" height="2" fill="var(--color-primary)" />
-      <rect x="6" y="11" width="4" height="2" fill="var(--color-primary)" />
-      <rect x="6" y="13" width="2" height="2" fill="var(--color-primary)" />
-    </svg>
-  `,
-};
-
-// B3: which CSS colour token marks a placed card as belonging to A vs B on
-// the board — reuses CARD_TYPE_ICONS for the type glyph itself (same icon
-// set as the hand, so a card looks the same wherever it's shown) and adds
-// only the owner's border colour, no new tokens. Both values already exist
-// in index.html's :root and are already contrast-verified there.
-const BOARD_OWNER_COLOR = {
-  A: "var(--color-primary-strong)",
-  B: "var(--color-accent)",
+  fire: `<svg viewBox="0 0 12 12" shape-rendering="crispEdges" aria-hidden="true" focusable="false"><rect x="6" y="0" width="1" height="1" fill="var(--color-accent-strong)"/><rect x="5" y="1" width="1" height="1" fill="var(--color-accent-strong)"/><rect x="6" y="1" width="1" height="1" fill="var(--color-accent)"/><rect x="7" y="1" width="1" height="1" fill="var(--color-accent-strong)"/><rect x="2" y="2" width="1" height="1" fill="var(--color-accent-strong)"/><rect x="5" y="2" width="1" height="1" fill="var(--color-accent-strong)"/><rect x="6" y="2" width="1" height="1" fill="var(--color-accent)"/><rect x="7" y="2" width="1" height="1" fill="var(--color-accent-strong)"/><rect x="10" y="2" width="1" height="1" fill="var(--color-accent-strong)"/><rect x="1" y="3" width="1" height="1" fill="var(--color-accent-strong)"/><rect x="2" y="3" width="1" height="1" fill="var(--color-accent)"/><rect x="3" y="3" width="1" height="1" fill="var(--color-accent-strong)"/><rect x="5" y="3" width="1" height="1" fill="var(--color-accent-strong)"/><rect x="6" y="3" width="2" height="1" fill="var(--color-accent)"/><rect x="8" y="3" width="1" height="1" fill="var(--color-accent-strong)"/><rect x="10" y="3" width="1" height="1" fill="var(--color-accent)"/><rect x="11" y="3" width="1" height="1" fill="var(--color-accent-strong)"/><rect x="1" y="4" width="1" height="1" fill="var(--color-accent-strong)"/><rect x="2" y="4" width="2" height="1" fill="var(--color-accent)"/><rect x="4" y="4" width="2" height="1" fill="var(--color-accent-strong)"/><rect x="6" y="4" width="3" height="1" fill="var(--color-accent)"/><rect x="9" y="4" width="1" height="1" fill="var(--color-accent-strong)"/><rect x="10" y="4" width="1" height="1" fill="var(--color-accent)"/><rect x="11" y="4" width="1" height="1" fill="var(--color-accent-strong)"/><rect x="1" y="5" width="1" height="1" fill="var(--color-accent-strong)"/><rect x="2" y="5" width="8" height="1" fill="var(--color-accent)"/><rect x="10" y="5" width="1" height="1" fill="var(--color-accent-strong)"/><rect x="0" y="6" width="1" height="1" fill="var(--color-accent-strong)"/><rect x="1" y="6" width="3" height="1" fill="var(--color-accent)"/><rect x="4" y="6" width="1" height="1" fill="#fff"/><rect x="5" y="6" width="2" height="1" fill="var(--color-accent)"/><rect x="7" y="6" width="1" height="1" fill="#fff"/><rect x="8" y="6" width="3" height="1" fill="var(--color-accent)"/><rect x="11" y="6" width="1" height="1" fill="var(--color-accent-strong)"/><rect x="0" y="7" width="1" height="1" fill="var(--color-accent-strong)"/><rect x="1" y="7" width="2" height="1" fill="var(--color-accent)"/><rect x="3" y="7" width="2" height="1" fill="#fff"/><rect x="5" y="7" width="2" height="1" fill="var(--color-accent)"/><rect x="7" y="7" width="2" height="1" fill="#fff"/><rect x="9" y="7" width="2" height="1" fill="var(--color-accent)"/><rect x="11" y="7" width="1" height="1" fill="var(--color-accent-strong)"/><rect x="0" y="8" width="1" height="1" fill="var(--color-accent-strong)"/><rect x="1" y="8" width="2" height="1" fill="var(--color-accent)"/><rect x="3" y="8" width="6" height="1" fill="#fff"/><rect x="9" y="8" width="2" height="1" fill="var(--color-accent)"/><rect x="11" y="8" width="1" height="1" fill="var(--color-accent-strong)"/><rect x="1" y="9" width="1" height="1" fill="var(--color-accent-strong)"/><rect x="2" y="9" width="2" height="1" fill="var(--color-accent)"/><rect x="4" y="9" width="4" height="1" fill="#fff"/><rect x="8" y="9" width="2" height="1" fill="var(--color-accent)"/><rect x="10" y="9" width="1" height="1" fill="var(--color-accent-strong)"/><rect x="2" y="10" width="1" height="1" fill="var(--color-accent-strong)"/><rect x="3" y="10" width="6" height="1" fill="var(--color-accent)"/><rect x="9" y="10" width="1" height="1" fill="var(--color-accent-strong)"/><rect x="3" y="11" width="6" height="1" fill="var(--color-accent-strong)"/></svg>`,
+  lightning: `<svg viewBox="0 0 12 12" shape-rendering="crispEdges" aria-hidden="true" focusable="false"><rect x="6" y="0" width="5" height="1" fill="var(--color-accent-strong)"/><rect x="5" y="1" width="1" height="1" fill="var(--color-accent-strong)"/><rect x="6" y="1" width="1" height="1" fill="#fff"/><rect x="7" y="1" width="3" height="1" fill="color-mix(in srgb, var(--color-accent) 55%, #fff)"/><rect x="10" y="1" width="1" height="1" fill="var(--color-accent-strong)"/><rect x="4" y="2" width="1" height="1" fill="var(--color-accent-strong)"/><rect x="5" y="2" width="1" height="1" fill="#fff"/><rect x="6" y="2" width="2" height="1" fill="color-mix(in srgb, var(--color-accent) 55%, #fff)"/><rect x="8" y="2" width="1" height="1" fill="var(--color-accent-strong)"/><rect x="3" y="3" width="1" height="1" fill="var(--color-accent-strong)"/><rect x="4" y="3" width="1" height="1" fill="#fff"/><rect x="5" y="3" width="2" height="1" fill="color-mix(in srgb, var(--color-accent) 55%, #fff)"/><rect x="7" y="3" width="1" height="1" fill="var(--color-accent-strong)"/><rect x="2" y="4" width="1" height="1" fill="var(--color-accent-strong)"/><rect x="3" y="4" width="1" height="1" fill="#fff"/><rect x="4" y="4" width="2" height="1" fill="color-mix(in srgb, var(--color-accent) 55%, #fff)"/><rect x="6" y="4" width="4" height="1" fill="var(--color-accent-strong)"/><rect x="1" y="5" width="1" height="1" fill="var(--color-accent-strong)"/><rect x="2" y="5" width="1" height="1" fill="#fff"/><rect x="3" y="5" width="6" height="1" fill="color-mix(in srgb, var(--color-accent) 55%, #fff)"/><rect x="9" y="5" width="1" height="1" fill="var(--color-accent-strong)"/><rect x="1" y="6" width="5" height="1" fill="var(--color-accent-strong)"/><rect x="6" y="6" width="2" height="1" fill="color-mix(in srgb, var(--color-accent) 55%, #fff)"/><rect x="8" y="6" width="1" height="1" fill="var(--color-accent-strong)"/><rect x="4" y="7" width="1" height="1" fill="var(--color-accent-strong)"/><rect x="5" y="7" width="2" height="1" fill="color-mix(in srgb, var(--color-accent) 55%, #fff)"/><rect x="7" y="7" width="1" height="1" fill="var(--color-accent-strong)"/><rect x="3" y="8" width="1" height="1" fill="var(--color-accent-strong)"/><rect x="4" y="8" width="2" height="1" fill="color-mix(in srgb, var(--color-accent) 55%, #fff)"/><rect x="6" y="8" width="1" height="1" fill="var(--color-accent-strong)"/><rect x="2" y="9" width="1" height="1" fill="var(--color-accent-strong)"/><rect x="3" y="9" width="2" height="1" fill="color-mix(in srgb, var(--color-accent) 55%, #fff)"/><rect x="5" y="9" width="1" height="1" fill="var(--color-accent-strong)"/><rect x="2" y="10" width="1" height="1" fill="var(--color-accent-strong)"/><rect x="3" y="10" width="1" height="1" fill="color-mix(in srgb, var(--color-accent) 55%, #fff)"/><rect x="4" y="10" width="1" height="1" fill="var(--color-accent-strong)"/><rect x="2" y="11" width="2" height="1" fill="var(--color-accent-strong)"/></svg>`,
+  water: `<svg viewBox="0 0 12 12" shape-rendering="crispEdges" aria-hidden="true" focusable="false"><rect x="5" y="0" width="2" height="1" fill="var(--color-primary-strong)"/><rect x="5" y="1" width="2" height="1" fill="var(--color-primary-strong)"/><rect x="4" y="2" width="1" height="1" fill="var(--color-primary-strong)"/><rect x="5" y="2" width="2" height="1" fill="var(--color-primary)"/><rect x="7" y="2" width="1" height="1" fill="var(--color-primary-strong)"/><rect x="4" y="3" width="1" height="1" fill="var(--color-primary-strong)"/><rect x="5" y="3" width="2" height="1" fill="var(--color-primary)"/><rect x="7" y="3" width="1" height="1" fill="var(--color-primary-strong)"/><rect x="3" y="4" width="1" height="1" fill="var(--color-primary-strong)"/><rect x="4" y="4" width="4" height="1" fill="var(--color-primary)"/><rect x="8" y="4" width="1" height="1" fill="var(--color-primary-strong)"/><rect x="2" y="5" width="1" height="1" fill="var(--color-primary-strong)"/><rect x="3" y="5" width="6" height="1" fill="var(--color-primary)"/><rect x="9" y="5" width="1" height="1" fill="var(--color-primary-strong)"/><rect x="1" y="6" width="1" height="1" fill="var(--color-primary-strong)"/><rect x="2" y="6" width="2" height="1" fill="#fff"/><rect x="4" y="6" width="6" height="1" fill="var(--color-primary)"/><rect x="10" y="6" width="1" height="1" fill="var(--color-primary-strong)"/><rect x="1" y="7" width="1" height="1" fill="var(--color-primary-strong)"/><rect x="2" y="7" width="1" height="1" fill="#fff"/><rect x="3" y="7" width="7" height="1" fill="var(--color-primary)"/><rect x="10" y="7" width="1" height="1" fill="var(--color-primary-strong)"/><rect x="1" y="8" width="1" height="1" fill="var(--color-primary-strong)"/><rect x="2" y="8" width="8" height="1" fill="var(--color-primary)"/><rect x="10" y="8" width="1" height="1" fill="var(--color-primary-strong)"/><rect x="1" y="9" width="1" height="1" fill="var(--color-primary-strong)"/><rect x="2" y="9" width="8" height="1" fill="var(--color-primary)"/><rect x="10" y="9" width="1" height="1" fill="var(--color-primary-strong)"/><rect x="2" y="10" width="1" height="1" fill="var(--color-primary-strong)"/><rect x="3" y="10" width="6" height="1" fill="var(--color-primary)"/><rect x="9" y="10" width="1" height="1" fill="var(--color-primary-strong)"/><rect x="3" y="11" width="6" height="1" fill="var(--color-primary-strong)"/></svg>`,
+  nature: `<svg viewBox="0 0 12 12" shape-rendering="crispEdges" aria-hidden="true" focusable="false"><rect x="7" y="0" width="4" height="1" fill="var(--color-primary-strong)"/><rect x="5" y="1" width="2" height="1" fill="var(--color-primary-strong)"/><rect x="7" y="1" width="3" height="1" fill="var(--color-primary)"/><rect x="10" y="1" width="1" height="1" fill="var(--color-primary-strong)"/><rect x="4" y="2" width="1" height="1" fill="var(--color-primary-strong)"/><rect x="5" y="2" width="4" height="1" fill="var(--color-primary)"/><rect x="9" y="2" width="1" height="1" fill="var(--color-primary-subtle)"/><rect x="10" y="2" width="1" height="1" fill="var(--color-primary-strong)"/><rect x="3" y="3" width="1" height="1" fill="var(--color-primary-strong)"/><rect x="4" y="3" width="4" height="1" fill="var(--color-primary)"/><rect x="8" y="3" width="1" height="1" fill="var(--color-primary-subtle)"/><rect x="9" y="3" width="1" height="1" fill="var(--color-primary)"/><rect x="10" y="3" width="1" height="1" fill="var(--color-primary-strong)"/><rect x="2" y="4" width="1" height="1" fill="var(--color-primary-strong)"/><rect x="3" y="4" width="4" height="1" fill="var(--color-primary)"/><rect x="7" y="4" width="1" height="1" fill="var(--color-primary-subtle)"/><rect x="8" y="4" width="2" height="1" fill="var(--color-primary)"/><rect x="10" y="4" width="1" height="1" fill="var(--color-primary-strong)"/><rect x="2" y="5" width="1" height="1" fill="var(--color-primary-strong)"/><rect x="3" y="5" width="3" height="1" fill="var(--color-primary)"/><rect x="6" y="5" width="1" height="1" fill="var(--color-primary-subtle)"/><rect x="7" y="5" width="3" height="1" fill="var(--color-primary)"/><rect x="10" y="5" width="1" height="1" fill="var(--color-primary-strong)"/><rect x="1" y="6" width="1" height="1" fill="var(--color-primary-strong)"/><rect x="2" y="6" width="3" height="1" fill="var(--color-primary)"/><rect x="5" y="6" width="1" height="1" fill="var(--color-primary-subtle)"/><rect x="6" y="6" width="4" height="1" fill="var(--color-primary)"/><rect x="10" y="6" width="1" height="1" fill="var(--color-primary-strong)"/><rect x="1" y="7" width="1" height="1" fill="var(--color-primary-strong)"/><rect x="2" y="7" width="2" height="1" fill="var(--color-primary)"/><rect x="4" y="7" width="1" height="1" fill="var(--color-primary-subtle)"/><rect x="5" y="7" width="4" height="1" fill="var(--color-primary)"/><rect x="9" y="7" width="1" height="1" fill="var(--color-primary-strong)"/><rect x="1" y="8" width="1" height="1" fill="var(--color-primary-strong)"/><rect x="2" y="8" width="1" height="1" fill="var(--color-primary)"/><rect x="3" y="8" width="1" height="1" fill="var(--color-primary-subtle)"/><rect x="4" y="8" width="4" height="1" fill="var(--color-primary)"/><rect x="8" y="8" width="1" height="1" fill="var(--color-primary-strong)"/><rect x="1" y="9" width="1" height="1" fill="var(--color-primary-strong)"/><rect x="2" y="9" width="1" height="1" fill="var(--color-primary-subtle)"/><rect x="3" y="9" width="3" height="1" fill="var(--color-primary)"/><rect x="6" y="9" width="2" height="1" fill="var(--color-primary-strong)"/><rect x="0" y="10" width="6" height="1" fill="var(--color-primary-strong)"/><rect x="0" y="11" width="1" height="1" fill="var(--color-primary-strong)"/></svg>`,
 };
 
 function log(message) {
@@ -126,13 +76,25 @@ function log(message) {
   logEl.scrollTop = logEl.scrollHeight;
 }
 
+// C1: visibility is a class toggle (index.html's .is-hidden) rather than an
+// inline style.display, so layout rules can give these elements flex/grid
+// display without JS overwriting it on every state change.
+function setVisible(el, visible) {
+  el.classList.toggle("is-hidden", !visible);
+}
+
+function setConnectionStatus(connected) {
+  connectionStatusEl.classList.toggle("is-connected", connected);
+  connectionStatusTextEl.textContent = connected ? "Connected" : "Disconnected";
+}
+
 let errorBannerTimeout = null;
 function showError(message) {
   errorBanner.textContent = message;
-  errorBanner.style.display = "block";
+  setVisible(errorBanner, true);
   clearTimeout(errorBannerTimeout);
   errorBannerTimeout = setTimeout(() => {
-    errorBanner.style.display = "none";
+    setVisible(errorBanner, false);
   }, 5000);
 }
 
@@ -141,7 +103,8 @@ const ws = new WebSocket(`${protocol}//${location.host}/ws`);
 
 ws.addEventListener("open", () => {
   log("[ws] connected");
-  disconnectBanner.style.display = "none";
+  setConnectionStatus(true);
+  setVisible(disconnectBanner, false);
   // A brand new session (never seated or queued before) gets no further
   // message from the server at all beyond "identity" — resolveSession's own
   // "status === new" branch (server.ts) deliberately sends nothing, since
@@ -150,7 +113,7 @@ ws.addEventListener("open", () => {
   // (assigned/queued/waiting) overrides this immediately once its own
   // message arrives.
   statusLine.textContent = "Connected. Click \"Join queue\" to find a match.";
-  joinQueueBtn.style.display = "inline-block";
+  setVisible(joinQueueBtn, true);
 });
 ws.addEventListener("close", () => {
   log("[ws] disconnected");
@@ -159,7 +122,8 @@ ws.addEventListener("close", () => {
   // debug <pre>. The server's own disconnect-grace-period mechanism (see
   // docs/authorization.md / PROCESS.md Stage 8a) means a reload within the
   // grace window resumes the same seat, so the message says exactly that.
-  disconnectBanner.style.display = "block";
+  setConnectionStatus(false);
+  setVisible(disconnectBanner, true);
 });
 ws.addEventListener("error", () => log("[ws] error"));
 
@@ -170,17 +134,17 @@ ws.addEventListener("message", (event) => {
     identityEl.textContent = `You are ${message.displayId}`;
   } else if (message.type === "assigned") {
     myPlayer = message.player;
-    lobbyPanel.style.display = "none";
-    gamePanel.style.display = "";
+    setVisible(lobbyPanel, false);
+    setVisible(gamePanel, true);
   } else if (message.type === "waiting") {
-    gamePanel.style.display = "none";
-    lobbyPanel.style.display = "";
-    joinQueueBtn.style.display = "none";
+    setVisible(gamePanel, false);
+    setVisible(lobbyPanel, true);
+    setVisible(joinQueueBtn, false);
     statusLine.textContent = `You are Player ${myPlayer}. Waiting for the second player to join...`;
   } else if (message.type === "queued") {
-    lobbyPanel.style.display = "";
-    gamePanel.style.display = "none";
-    joinQueueBtn.style.display = "none";
+    setVisible(lobbyPanel, true);
+    setVisible(gamePanel, false);
+    setVisible(joinQueueBtn, false);
     statusLine.textContent = "In queue — waiting for an opponent...";
   } else if (message.type === "state") {
     lastState = message.state;
@@ -190,9 +154,9 @@ ws.addEventListener("message", (event) => {
     myPlayer = null;
     lastState = null;
     lastSeries = null;
-    gamePanel.style.display = "none";
-    lobbyPanel.style.display = "";
-    joinQueueBtn.style.display = "";
+    setVisible(gamePanel, false);
+    setVisible(lobbyPanel, true);
+    setVisible(joinQueueBtn, true);
     statusLine.textContent = describeSeriesEnded(message);
   } else if (message.type === "error") {
     log("[server error] " + message.message);
@@ -271,24 +235,19 @@ function renderBoard(state) {
   const myTurn = state.status === "active" && state.currentPlayer === myPlayer;
 
   boardEl.innerHTML = "";
-  boardEl.style.gridTemplateColumns = `repeat(${size}, 52px)`;
+  boardEl.style.gridTemplateColumns = `repeat(${size}, var(--cell-size))`;
 
   for (let r = 0; r < size; r++) {
     for (let c = 0; c < size; c++) {
       const cell = state.board[r][c];
       const button = document.createElement("button");
-      // B3: a placed card shows only its type icon (same CARD_TYPE_ICONS set
-      // the hand already uses, so a card reads the same wherever it's
-      // shown) plus a border coloured by owner — no text in the cell itself,
-      // the 52px cell has no room for icon + owner + type text together
-      // (confirmed by measuring the rendered board, not assumed). The
-      // owner/type info this used to show as "A:fi" text now lives only in
-      // aria-label, so a screen reader or anyone not relying on the icon's
-      // shape/colour alone still gets the real content, not just a coloured
-      // square with no label.
+      // A placed card shows only its type icon (same CARD_TYPE_ICONS as the
+      // hand) with owner shown by the owner-a/owner-b class — the cell has
+      // no room for text, so owner/type live in aria-label for anyone not
+      // relying on the icon's shape/colour alone.
       if (cell) {
         button.innerHTML = CARD_TYPE_ICONS[cell.type];
-        button.style.borderColor = BOARD_OWNER_COLOR[cell.owner];
+        button.classList.add(cell.owner === "A" ? "owner-a" : "owner-b");
         button.setAttribute("aria-label", `Player ${cell.owner}'s ${cell.type} card`);
       } else {
         button.setAttribute("aria-label", "Empty cell");
@@ -298,6 +257,8 @@ function renderBoard(state) {
       // in every one of those cases, this just avoids sending a request that
       // can only fail.
       button.disabled = !myTurn || cell !== null || selectedHandIndex === null;
+      // Purely the inverse of the disabled check above, for styling.
+      button.classList.toggle("is-playable", !button.disabled);
       button.addEventListener("click", () => {
         send({ type: "play", handIndex: selectedHandIndex, row: r, col: c });
         selectedHandIndex = null;
@@ -354,18 +315,18 @@ function renderActionButtons(state) {
 
 function renderQuitPanel(state, opponentId) {
   if (state.status !== "active") {
-    quitPanel.style.display = "none";
+    setVisible(quitPanel, false);
     return;
   }
-  quitPanel.style.display = "block";
+  setVisible(quitPanel, true);
 
   const myOffer = state.quitRequested[myPlayer];
   const theirOffer = state.quitRequested[opponentId];
 
-  requestQuitBtn.style.display = !myOffer && !theirOffer ? "inline-block" : "none";
-  cancelQuitBtn.style.display = myOffer ? "inline-block" : "none";
-  acceptQuitBtn.style.display = theirOffer && !myOffer ? "inline-block" : "none";
-  declineQuitBtn.style.display = theirOffer && !myOffer ? "inline-block" : "none";
+  setVisible(requestQuitBtn, !myOffer && !theirOffer);
+  setVisible(cancelQuitBtn, myOffer);
+  setVisible(acceptQuitBtn, theirOffer && !myOffer);
+  setVisible(declineQuitBtn, theirOffer && !myOffer);
 
   if (myOffer) {
     quitStatusEl.textContent = "You offered to end this game early — waiting for your opponent.";
@@ -378,10 +339,10 @@ function renderQuitPanel(state, opponentId) {
 
 function renderNewGamePanel(state, opponentId) {
   if (state.status === "active") {
-    newGamePanel.style.display = "none";
+    setVisible(newGamePanel, false);
     return;
   }
-  newGamePanel.style.display = "block";
+  setVisible(newGamePanel, true);
   const myConfirm = state.restartConfirmed[myPlayer];
   const theirConfirm = state.restartConfirmed[opponentId];
   newGameBtn.disabled = myConfirm;

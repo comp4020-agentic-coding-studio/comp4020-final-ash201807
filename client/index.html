@@ -4,6 +4,12 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Card Board Game</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,700&family=Inter:wght@400;500;600&display=swap"
+    />
     <style>
       /* Stage A — Modern Minimalism visual foundation. Still a functional
          layout, no new DOM: every rule below targets a selector that already
@@ -83,7 +89,12 @@
         --color-primary-subtle: #e8eee5;
         --color-primary-strong: #5b6e54;
         --color-accent: #d99a70;
+        /* C2: derived from existing tokens, no new hues. accent-strong vs
+           white 4.66:1 (B's board border, icon outlines). */
+        --color-accent-strong: color-mix(in srgb, var(--color-accent) 60%, var(--color-text));
+        --color-accent-subtle: color-mix(in srgb, var(--color-accent) 25%, #fff);
         --color-border: #e4e5dd;
+        --cell-size: 64px;
         --color-error: #a8504a;
         --color-error-strong: #7a3a35;
 
@@ -98,22 +109,68 @@
         --radius-md: 10px;
         --radius-lg: 16px;
 
-        --font-sans: system-ui, sans-serif;
+        /* C1: Inter/Fraunces load from Google Fonts; system fonts remain
+           the fallback so the page still renders correctly offline. */
+        --font-sans: "Inter", system-ui, sans-serif;
+        --font-display: "Fraunces", Georgia, "Times New Roman", serif;
+      }
+      .is-hidden {
+        /* !important: must beat ID-selector display rules (e.g. banners). */
+        display: none !important;
       }
       body {
         font-family: var(--font-sans);
-        background: var(--color-bg);
+        /* C1: warm wash derived from existing tokens, no new colour values. */
+        background: linear-gradient(
+            180deg,
+            color-mix(in srgb, var(--color-accent) 22%, var(--color-bg)) 0%,
+            var(--color-bg) 45%,
+            var(--color-primary-subtle) 100%
+          )
+          fixed;
         color: var(--color-text);
         line-height: 1.5;
-        max-width: 640px;
+        margin: 0;
+        min-height: 100vh;
+      }
+      .app {
+        max-width: 960px;
         margin: 0 auto;
-        padding: var(--space-4);
+        padding: var(--space-6);
+      }
+      .app-header {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: flex-end;
+        justify-content: space-between;
+        gap: var(--space-3);
+        margin-bottom: var(--space-6);
       }
       h1 {
-        font-size: 1.4rem;
-        font-weight: 600;
+        font-family: var(--font-display);
+        font-size: 2.25rem;
+        font-weight: 700;
+        line-height: 1.1;
         letter-spacing: -0.01em;
-        margin: 0 0 var(--space-2);
+        margin: 0;
+      }
+      .app-tagline {
+        margin: var(--space-1) 0 0;
+        color: var(--color-text-secondary);
+      }
+      .app-meta {
+        display: flex;
+        flex-direction: column;
+        align-items: flex-end;
+        gap: var(--space-1);
+        font-size: 0.85rem;
+      }
+      .label {
+        font-size: 0.75rem;
+        font-weight: 600;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--color-text-secondary);
       }
       a {
         color: var(--color-text);
@@ -147,23 +204,112 @@
       }
       #identity {
         color: var(--color-text-secondary);
-        font-size: 0.9rem;
+        margin: 0;
       }
-      #lobby-panel,
-      #game-panel {
-        background: var(--color-surface);
-        border: 1px solid var(--color-border);
-        border-radius: var(--radius-md);
-        padding: var(--space-4);
-        margin: var(--space-4) 0;
+      .connection-status {
+        display: inline-flex;
+        align-items: center;
+        gap: var(--space-2);
+        color: var(--color-text-secondary);
+      }
+      .connection-status::before {
+        content: "";
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: var(--color-error);
+      }
+      .connection-status.is-connected::before {
+        background: var(--color-primary-strong);
+      }
+      .btn--primary {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: var(--space-3);
+        background: var(--color-primary-strong);
+        border-color: var(--color-primary-strong);
+        color: #fff;
+        font-size: 1.05rem;
+        font-weight: 600;
+        padding: var(--space-3) var(--space-8);
+        border-radius: 999px;
+      }
+      .btn--primary:hover:not(:disabled) {
+        background: var(--color-text);
+        border-color: var(--color-text);
       }
       #disconnect-banner,
       #error-banner {
-        display: none;
-        padding: var(--space-2) var(--space-4);
-        border-radius: var(--radius-sm);
-        margin: var(--space-2) 0;
+        padding: var(--space-3) var(--space-4);
+        border-radius: var(--radius-md);
+        margin: 0 0 var(--space-4);
         font-weight: 600;
+      }
+      .lobby {
+        max-width: 520px;
+        margin: var(--space-8) auto;
+        background: var(--color-surface);
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-lg);
+        padding: var(--space-6);
+      }
+      .lobby-ready {
+        margin-top: var(--space-4);
+        background: var(--color-primary-subtle);
+        border-radius: var(--radius-md);
+        padding: var(--space-6);
+        display: flex;
+        flex-direction: column;
+        gap: var(--space-4);
+      }
+      .lobby-ready .btn--primary {
+        width: 100%;
+      }
+      .game {
+        display: flex;
+        flex-direction: column;
+        gap: var(--space-6);
+      }
+      .game-topbar {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: space-between;
+        gap: var(--space-3);
+      }
+      .game-topbar p {
+        margin: 0;
+      }
+      #turn-indicator {
+        font-weight: 600;
+        background: var(--color-surface);
+        border: 1px solid var(--color-border);
+        border-radius: 999px;
+        padding: var(--space-1) var(--space-4);
+      }
+      .zone-title {
+        display: flex;
+        align-items: baseline;
+        gap: var(--space-2);
+        margin: 0 0 var(--space-3);
+      }
+      .zone-hint {
+        margin: calc(-1 * var(--space-2)) 0 var(--space-3);
+        font-size: 0.85rem;
+        color: var(--color-text-secondary);
+      }
+      .battlefield {
+        background: var(--color-primary);
+        border-radius: var(--radius-lg);
+        padding: var(--space-6);
+        display: flex;
+        justify-content: center;
+      }
+      .game-actions {
+        display: flex;
+        flex-direction: column;
+        gap: var(--space-3);
       }
       #disconnect-banner {
         background: var(--color-error-strong);
@@ -174,8 +320,9 @@
         color: #fff;
       }
       #status-line {
-        font-size: 1.1rem;
-        margin: var(--space-3) 0;
+        font-size: 1.15rem;
+        font-weight: 600;
+        margin: 0;
       }
       #series-score {
         font-size: 0.95rem;
@@ -183,111 +330,199 @@
       }
       #hp-ap-row {
         display: flex;
-        gap: var(--space-6);
-        margin: var(--space-2) 0;
+        flex-wrap: wrap;
+        gap: var(--space-3) var(--space-6);
         font-variant-numeric: tabular-nums;
       }
       #board {
         display: inline-grid;
         gap: var(--space-1);
-        margin: var(--space-3) 0;
-        background: var(--color-border);
+        background: var(--color-primary-strong);
         padding: var(--space-1);
-        border-radius: var(--radius-sm);
+        border-radius: var(--radius-md);
       }
+      /* C2 board cells. States are told apart by fill/border, not by the
+         global disabled opacity, so owner colour stays legible on placed
+         cards (which are always disabled). */
       #board button {
-        width: 52px;
-        height: 52px;
-        font-size: 0.8rem;
+        width: var(--cell-size);
+        height: var(--cell-size);
         border-radius: var(--radius-sm);
         display: flex;
         align-items: center;
         justify-content: center;
         padding: 0;
+        border: 2px solid transparent;
+        background: var(--color-primary-subtle);
       }
       #board button:disabled {
-        background: var(--color-surface);
+        opacity: 1;
+        cursor: default;
       }
-      /* B3: the type-icon drawn into a placed card's cell (same
-         CARD_TYPE_ICONS set the hand uses) — the cell's own border colour,
-         set inline per-cell by app.js's BOARD_OWNER_COLOR, carries owner
-         instead of text, since a 52px cell has no room for icon + owner +
-         type text together. */
+      #board button.is-playable {
+        background: var(--color-surface);
+        border: 2px dashed var(--color-primary-strong);
+        cursor: pointer;
+      }
+      #board button.is-playable:hover {
+        background: var(--color-primary-subtle);
+        border-style: solid;
+      }
+      #board button.owner-a {
+        background: var(--color-surface);
+        border: 2px solid var(--color-primary-strong);
+      }
+      #board button.owner-b {
+        background: var(--color-accent-subtle);
+        border: 2px solid var(--color-accent-strong);
+      }
       #board button svg {
         display: block;
-        width: 20px;
-        height: 20px;
+        width: 60%;
+        height: 60%;
       }
+      #opponent-hand {
+        display: flex;
+        flex-wrap: wrap;
+        gap: var(--space-2);
+      }
+      /* B1 card back: fixed pattern from app.js's OPPONENT_CARD_BACK_SVG,
+         never changed by card contents. */
       #opponent-hand .card-back {
         display: inline-block;
         width: 60px;
         height: 36px;
-        margin-right: var(--space-1);
-        margin-bottom: var(--space-1);
         background: var(--color-primary-subtle);
-        border: 1px solid var(--color-border);
+        border: 1px solid var(--color-primary);
         border-radius: var(--radius-sm);
         overflow: hidden;
       }
-      /* B1: the fixed diamond pattern drawn into every card-back span by
-         app.js's OPPONENT_CARD_BACK_SVG constant — sized to fill the
-         existing 60x36 box exactly, never changed by card contents. */
       #opponent-hand .card-back svg {
         display: block;
         width: 100%;
         height: 100%;
       }
-      /* B2: own hand buttons no longer share a fixed width with the
-         opponent's card-back (that rule above is now independent) — width
-         is intentionally auto, sized by its icon + the full card-type word,
-         so "lightning" (the longest name) renders complete instead of being
-         clipped by a fixed box too narrow for it. Buttons of different
-         lengths wrap naturally inside #hand, same as the browser's default
-         inline flow for any row of variable-width buttons. */
+      /* C2 hand cards: vertical card, illustration on top, full name below.
+         Name may wrap but is never clipped. */
+      #hand {
+        display: flex;
+        flex-wrap: wrap;
+        gap: var(--space-3);
+        padding-top: var(--space-1);
+      }
       #hand button {
-        display: inline-flex;
+        width: 104px;
+        min-height: 128px;
+        display: flex;
+        flex-direction: column;
         align-items: center;
         gap: var(--space-2);
-        margin-right: var(--space-1);
-        margin-bottom: var(--space-1);
+        padding: var(--space-3);
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-md);
+        background: var(--color-surface);
+        font-size: 0.875rem;
+        font-weight: 600;
+        overflow-wrap: anywhere;
+        transition:
+          transform 0.15s ease,
+          border-color 0.15s ease,
+          background-color 0.15s ease;
       }
       #hand button svg {
         display: block;
-        width: 16px;
-        height: 16px;
-        flex: 0 0 auto;
+        box-sizing: border-box;
+        width: 100%;
+        aspect-ratio: 1;
+        padding: var(--space-3);
+        background: var(--color-bg);
+        border-radius: var(--radius-sm);
+      }
+      #hand button:hover:not(:disabled) {
+        border-color: var(--color-primary-strong);
+        background: var(--color-surface);
       }
       #hand button.selected {
-        border-color: var(--color-primary-strong);
+        border: 2px solid var(--color-primary-strong);
         background: var(--color-primary-subtle);
+        transform: translateY(-4px);
+        padding: calc(var(--space-3) - 1px);
       }
-      .action-row {
-        margin: var(--space-3) 0;
+      #hand button.selected svg {
+        background: var(--color-surface);
       }
-      .action-row button {
-        margin-right: var(--space-2);
+      #hand button:disabled {
+        opacity: 1;
+        color: var(--color-text-secondary);
+      }
+      #hand button:disabled svg {
+        opacity: 0.7;
       }
       button:disabled {
         opacity: 0.5;
         cursor: not-allowed;
       }
-      #quit-panel {
+      #quit-panel,
+      #newgame-panel {
+        background: var(--color-surface);
         border: 1px solid var(--color-border);
-        border-radius: var(--radius-sm);
-        padding: var(--space-2);
-        margin: var(--space-2) 0;
+        border-radius: var(--radius-md);
+        padding: var(--space-3) var(--space-4);
+      }
+      #quit-panel p,
+      #newgame-panel p {
+        margin: 0 0 var(--space-2);
+      }
+      #quit-panel p:empty,
+      #newgame-panel p:empty {
         display: none;
       }
-      #newgame-panel {
-        border: 1px solid var(--color-border);
-        border-radius: var(--radius-sm);
-        padding: var(--space-2);
-        margin: var(--space-2) 0;
-        display: none;
+      .action-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: var(--space-2);
       }
       details#log-details {
-        margin-top: var(--space-6);
+        margin-top: var(--space-8);
         color: var(--color-text-secondary);
+      }
+      @media (max-width: 599px) {
+        .app {
+          padding: var(--space-3);
+        }
+        h1 {
+          font-size: 1.75rem;
+        }
+        .app-meta {
+          align-items: flex-start;
+        }
+        .lobby {
+          margin: var(--space-4) 0;
+          padding: var(--space-4);
+        }
+        .lobby-ready {
+          padding: var(--space-4);
+        }
+        .battlefield {
+          padding: var(--space-3);
+        }
+        :root {
+          --cell-size: 52px;
+        }
+        #hand {
+          gap: var(--space-2);
+        }
+        #hand button {
+          width: 88px;
+          min-height: 112px;
+          padding: var(--space-2);
+        }
+        #hand button.selected {
+          padding: calc(var(--space-2) - 1px);
+        }
+        #hand button svg {
+          padding: var(--space-2);
+        }
       }
       #log {
         font-size: 0.75rem;
@@ -300,56 +535,84 @@
     </style>
   </head>
   <body>
-    <main>
-      <h1>Card Board Game</h1>
-      <p><a href="/readme/">About this app</a></p>
-      <p id="identity">connecting…</p>
+    <main class="app">
+      <header class="app-header">
+        <div>
+          <h1>Card Board Game</h1>
+          <p class="app-tagline">A quiet little strategy game.</p>
+        </div>
+        <div class="app-meta">
+          <span id="connection-status" class="connection-status"
+            ><span id="connection-status-text">Connecting…</span></span
+          >
+          <p id="identity">connecting…</p>
+          <a href="/readme/">About this app</a>
+        </div>
+      </header>
 
-      <div id="disconnect-banner">Connection lost. Reload this page to reconnect — your place is saved.</div>
-      <div id="error-banner"></div>
+      <div id="disconnect-banner" class="is-hidden">Connection lost. Reload this page to reconnect — your place is saved.</div>
+      <div id="error-banner" class="is-hidden"></div>
 
-      <section id="lobby-panel">
-        <p id="status-line">Connecting…</p>
-        <button id="joinqueue-btn" style="display: none">Join queue</button>
+      <section id="lobby-panel" class="lobby">
+        <p class="label">Matchmaking</p>
+        <div class="lobby-ready">
+          <p id="status-line">Connecting…</p>
+          <button id="joinqueue-btn" class="btn--primary is-hidden">
+            Join queue<span aria-hidden="true">→</span>
+          </button>
+        </div>
       </section>
 
-      <section id="game-panel" style="display: none">
-        <p id="series-score"></p>
+      <section id="game-panel" class="game is-hidden">
+        <div class="game-topbar">
+          <p id="series-score"></p>
+          <p id="turn-indicator"></p>
+        </div>
         <div id="hp-ap-row">
           <span id="my-hp"></span>
           <span id="opp-hp"></span>
           <span id="ap-display"></span>
         </div>
-        <p id="turn-indicator"></p>
 
-        <div id="board"></div>
-
-        <p>Opponent's hand (<span id="opp-hand-count">0</span> cards):</p>
-        <div id="opponent-hand"></div>
-
-        <p>Your hand (click a card, then click a board cell to play it):</p>
-        <div id="hand"></div>
-
-        <div class="action-row">
-          <button id="draw-btn">Draw</button>
-          <button id="endturn-btn">End Turn</button>
+        <div class="game-zone">
+          <h2 class="zone-title label">Opponent's hand <span>(<span id="opp-hand-count">0</span>)</span></h2>
+          <div id="opponent-hand"></div>
         </div>
 
-        <div id="quit-panel">
-          <p id="quit-status"></p>
-          <button id="requestquit-btn">Offer to end game early</button>
-          <button id="cancelquit-btn" style="display: none">Cancel my offer</button>
-          <button id="acceptquit-btn" style="display: none">Accept — end game early</button>
-          <button id="declinequit-btn" style="display: none">Decline</button>
+        <div class="battlefield">
+          <div id="board"></div>
         </div>
 
-        <div class="action-row">
-          <button id="forfeit-btn">Forfeit whole match</button>
+        <div class="game-zone">
+          <h2 class="zone-title label">Your hand</h2>
+          <p class="zone-hint">Pick a card, then a board cell.</p>
+          <div id="hand"></div>
         </div>
 
-        <div id="newgame-panel">
-          <p id="newgame-status"></p>
-          <button id="newgame-btn">Ready for next game</button>
+        <div class="game-actions">
+          <div class="action-row">
+            <button id="draw-btn">Draw</button>
+            <button id="endturn-btn">End Turn</button>
+          </div>
+
+          <div id="quit-panel" class="is-hidden">
+            <p id="quit-status"></p>
+            <div class="action-row">
+              <button id="requestquit-btn">Offer to end game early</button>
+              <button id="cancelquit-btn" class="is-hidden">Cancel my offer</button>
+              <button id="acceptquit-btn" class="is-hidden">Accept — end game early</button>
+              <button id="declinequit-btn" class="is-hidden">Decline</button>
+            </div>
+          </div>
+
+          <div class="action-row">
+            <button id="forfeit-btn">Forfeit whole match</button>
+          </div>
+
+          <div id="newgame-panel" class="is-hidden">
+            <p id="newgame-status"></p>
+            <button id="newgame-btn">Ready for next game</button>
+          </div>
         </div>
       </section>
 
