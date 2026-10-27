@@ -239,6 +239,18 @@
         background: var(--color-text);
         border-color: var(--color-text);
       }
+      /* Dangerous action: error-coloured outline + text, not a fill, so it
+         reads as serious without competing with the primary action. */
+      .btn--danger {
+        color: var(--color-error);
+        border-color: var(--color-error);
+        background: var(--color-surface);
+      }
+      .btn--danger:hover:not(:disabled) {
+        background: var(--color-error);
+        border-color: var(--color-error);
+        color: #fff;
+      }
       #disconnect-banner,
       #error-banner {
         padding: var(--space-3) var(--space-4);
@@ -281,12 +293,22 @@
       .game-topbar p {
         margin: 0;
       }
+      .score {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+      }
       #turn-indicator {
         font-weight: 600;
         background: var(--color-surface);
         border: 1px solid var(--color-border);
         border-radius: 999px;
-        padding: var(--space-1) var(--space-4);
+        padding: var(--space-2) var(--space-4);
+      }
+      #turn-indicator.is-my-turn {
+        background: var(--color-primary-strong);
+        border-color: var(--color-primary-strong);
+        color: #fff;
       }
       .zone-title {
         display: flex;
@@ -325,14 +347,52 @@
         margin: 0;
       }
       #series-score {
-        font-size: 0.95rem;
-        color: var(--color-text-secondary);
-      }
-      #hp-ap-row {
-        display: flex;
-        flex-wrap: wrap;
-        gap: var(--space-3) var(--space-6);
+        font-size: 1.05rem;
+        font-weight: 600;
         font-variant-numeric: tabular-nums;
+      }
+      /* C3: HP/AP as label + large number; the HP bar is decorative
+         (aria-hidden) — the number is the real value. */
+      #hp-ap-row {
+        display: grid;
+        grid-template-columns: 1fr 1fr auto;
+        gap: var(--space-3);
+        font-variant-numeric: tabular-nums;
+      }
+      .stat {
+        display: flex;
+        flex-direction: column;
+        gap: var(--space-1);
+        background: var(--color-surface);
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-md);
+        padding: var(--space-3) var(--space-4);
+      }
+      .stat-value {
+        font-size: 1.25rem;
+        font-weight: 600;
+        line-height: 1.2;
+      }
+      .stat--ap {
+        min-width: 72px;
+      }
+      .hp-bar {
+        height: 6px;
+        border-radius: 999px;
+        background: var(--color-primary-subtle);
+        overflow: hidden;
+      }
+      .hp-bar > span {
+        display: block;
+        height: 100%;
+        background: var(--color-primary-strong);
+        border-radius: inherit;
+      }
+      .hp-bar--opponent > span {
+        background: var(--color-accent-strong);
+      }
+      .hp-bar--opponent {
+        background: var(--color-accent-subtle);
       }
       #board {
         display: inline-grid;
@@ -477,10 +537,30 @@
       #newgame-panel p:empty {
         display: none;
       }
+      /* Quit negotiation: accent left edge marks "pending agreement";
+         new-game panel uses the primary tint since it's the next step. */
+      #quit-panel {
+        border-left: 4px solid var(--color-accent);
+      }
+      #newgame-panel {
+        background: var(--color-primary-subtle);
+        border-color: var(--color-primary-subtle);
+        border-left: 4px solid var(--color-primary-strong);
+      }
+      #newgame-btn {
+        font-size: 0.95rem;
+        padding: var(--space-2) var(--space-6);
+      }
       .action-row {
         display: flex;
         flex-wrap: wrap;
         gap: var(--space-2);
+      }
+      /* Forfeit sits apart from the everyday turn actions to avoid misclicks. */
+      .action-row--danger {
+        margin-top: var(--space-3);
+        padding-top: var(--space-3);
+        border-top: 1px solid var(--color-border);
       }
       details#log-details {
         margin-top: var(--space-8);
@@ -522,6 +602,21 @@
         }
         #hand button svg {
           padding: var(--space-2);
+        }
+        #hp-ap-row {
+          grid-template-columns: 1fr 1fr;
+        }
+        .stat {
+          padding: var(--space-2) var(--space-3);
+        }
+        .stat--ap {
+          grid-column: 1 / -1;
+          flex-direction: row;
+          align-items: baseline;
+          gap: var(--space-2);
+        }
+        .game-actions button {
+          min-height: 44px;
         }
       }
       #log {
@@ -565,13 +660,27 @@
 
       <section id="game-panel" class="game is-hidden">
         <div class="game-topbar">
-          <p id="series-score"></p>
+          <div class="score">
+            <span class="label">Match score</span>
+            <p id="series-score"></p>
+          </div>
           <p id="turn-indicator"></p>
         </div>
         <div id="hp-ap-row">
-          <span id="my-hp"></span>
-          <span id="opp-hp"></span>
-          <span id="ap-display"></span>
+          <div class="stat">
+            <span class="label">Your HP</span>
+            <span id="my-hp" class="stat-value"></span>
+            <span class="hp-bar" aria-hidden="true"><span id="my-hp-bar"></span></span>
+          </div>
+          <div class="stat">
+            <span class="label">Opponent HP</span>
+            <span id="opp-hp" class="stat-value"></span>
+            <span class="hp-bar hp-bar--opponent" aria-hidden="true"><span id="opp-hp-bar"></span></span>
+          </div>
+          <div class="stat stat--ap">
+            <span class="label">AP</span>
+            <span id="ap-display" class="stat-value"></span>
+          </div>
         </div>
 
         <div class="game-zone">
@@ -605,13 +714,13 @@
             </div>
           </div>
 
-          <div class="action-row">
-            <button id="forfeit-btn">Forfeit whole match</button>
+          <div class="action-row action-row--danger">
+            <button id="forfeit-btn" class="btn--danger">Forfeit whole match</button>
           </div>
 
           <div id="newgame-panel" class="is-hidden">
             <p id="newgame-status"></p>
-            <button id="newgame-btn">Ready for next game</button>
+            <button id="newgame-btn" class="btn--primary">Ready for next game</button>
           </div>
         </div>
       </section>

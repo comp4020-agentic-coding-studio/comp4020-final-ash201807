@@ -40,6 +40,16 @@ const newGameBtn = document.getElementById("newgame-btn");
 const logEl = document.getElementById("log");
 const connectionStatusEl = document.getElementById("connection-status");
 const connectionStatusTextEl = document.getElementById("connection-status-text");
+const myHpBarEl = document.getElementById("my-hp-bar");
+const oppHpBarEl = document.getElementById("opp-hp-bar");
+
+// Display-only scale for the HP bar. The server doesn't send max HP; this
+// mirrors engine.ts's STARTING_HP and must be updated if that changes. HP
+// can go below 0, so the bar is clamped — the number shows the real value.
+const HP_BAR_MAX = 100;
+function hpBarWidth(hp) {
+  return `${Math.max(0, Math.min(100, (hp / HP_BAR_MAX) * 100))}%`;
+}
 
 // B1: a single, fixed pixel-art pattern for every opponent card back,
 // regardless of what's actually in their hand — the server never tells this
@@ -199,12 +209,14 @@ function render() {
   const opponent = state.players[opponentId];
 
   seriesScoreEl.textContent = series
-    ? `Match score — you: ${series.gamesWon[myPlayer]}  opponent: ${series.gamesWon[opponentId]}`
+    ? `You ${series.gamesWon[myPlayer]} — ${series.gamesWon[opponentId]} Opponent`
     : "";
 
-  myHpEl.textContent = `Your HP: ${me.hp}`;
-  oppHpEl.textContent = `Opponent HP: ${opponent.hp}`;
-  apDisplayEl.textContent = `AP: ${state.ap}`;
+  myHpEl.textContent = String(me.hp);
+  oppHpEl.textContent = String(opponent.hp);
+  myHpBarEl.style.width = hpBarWidth(me.hp);
+  oppHpBarEl.style.width = hpBarWidth(opponent.hp);
+  apDisplayEl.textContent = String(state.ap);
 
   renderTurnIndicator(state);
   renderBoard(state);
@@ -216,6 +228,11 @@ function render() {
 }
 
 function renderTurnIndicator(state) {
+  // Styling hook only; the text itself still states whose turn it is.
+  turnIndicatorEl.classList.toggle(
+    "is-my-turn",
+    state.status === "active" && state.currentPlayer === myPlayer,
+  );
   if (state.status === "active") {
     turnIndicatorEl.textContent = state.currentPlayer === myPlayer ? "YOUR TURN" : "Opponent's turn";
     return;
