@@ -198,9 +198,22 @@
         border-color: var(--color-primary-strong);
         background: var(--color-primary-subtle);
       }
-      button:focus-visible {
+      button:focus-visible,
+      a:focus-visible,
+      summary:focus-visible {
         outline: 2px solid var(--color-primary-strong);
-        outline-offset: 1px;
+        outline-offset: 2px;
+        border-radius: 2px;
+      }
+      @media (prefers-reduced-motion: reduce) {
+        *,
+        *::before {
+          transition: none !important;
+        }
+        #hand button.selected {
+          /* !important: this block precedes the base .selected rule. */
+          transform: none !important;
+        }
       }
       #identity {
         color: var(--color-text-secondary);
@@ -448,11 +461,15 @@
       }
       /* B1 card back: fixed pattern from app.js's OPPONENT_CARD_BACK_SVG,
          never changed by card contents. */
+      /* C4: portrait back to match the hand cards' proportions (was 60x36
+         landscape). Pattern is a fixed constant; only the count varies. */
       #opponent-hand .card-back {
         display: inline-block;
-        width: 60px;
-        height: 36px;
-        background: var(--color-primary-subtle);
+        box-sizing: border-box;
+        width: 56px;
+        height: 76px;
+        padding: 6px;
+        background: var(--color-surface);
         border: 1px solid var(--color-primary);
         border-radius: var(--radius-sm);
         overflow: hidden;
@@ -617,6 +634,11 @@
         }
         .game-actions button {
           min-height: 44px;
+        }
+        #opponent-hand .card-back {
+          width: 44px;
+          height: 60px;
+          padding: 4px;
         }
       }
       #log {
