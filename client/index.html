@@ -5,103 +5,297 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Card Board Game</title>
     <style>
-      /* Minimal, functional layout only — legibility, not visual polish.
-         Per the stage 3 brief: "CSS美化、动画和复杂视觉效果不是本阶段目标". */
+      /* Stage A — Modern Minimalism visual foundation. Still a functional
+         layout, no new DOM: every rule below targets a selector that already
+         existed in this file. Tokens defined as CSS custom properties so
+         colour/spacing/radius/font stay centralised in one place.
+
+         Contrast verified against this file's own two backgrounds
+         (--color-bg #F7F6F0, --color-surface #FFFFFF) using WCAG 2.1's
+         relative-luminance formula via a standalone script, not eyeballed —
+         see the Stage A/A-followup reports for the full numbers. Findings
+         that drove deviations from the initial colour brief:
+         - #879C82 (primary) and #D99A70 (accent) both fail 4.5:1 as
+           *foreground text* on either background (primary: 2.73:1 on bg,
+           2.95:1 on surface; accent: 2.20:1 on bg, 2.38:1 on surface) —
+           neither is used as a text colour below; both are used as
+           fills/borders with dark (--color-text) text on top instead, or as
+           non-text accents (underlines, focus rings).
+         - --color-primary itself, used directly as a hover/focus *border* or
+           outline against --color-surface, measured 2.95:1 — under WCAG
+           1.4.11's 3:1 non-text-UI-component threshold. Rather than darken
+           the brief's own fixed base sage-green value (keeping #879C82
+           exactly as given), a second, separate token —
+           --color-primary-strong (#5B6E54, same hue family, darkened for
+           contrast only) — was added and used specifically where 3:1 is
+           required: every button's default/hover border, the focus-visible
+           outline, and the board's dividing grid lines. --color-primary
+           itself is kept unchanged everywhere else (hover fill tint,
+           link-hover colour, opponent card-back fill) so the overall
+           warm-white/sage/apricot direction isn't uniformly darkened just to
+           pass one check. --color-primary-strong against surface: 5.52:1;
+           against page bg: 5.10:1; against board-grid bg (#E4E5DD): 4.35:1 —
+           all clear 3:1 by a wide margin, confirmed via the same script.
+         - A second real gap, found auditing every actual button/border pair
+           rather than trusting the original Stage A pass: the default
+           (non-hover, non-focus) button border used --color-border
+           (#E4E5DD) against the button's own white fill — 1.27:1, nowhere
+           near 3:1, meaning an unfocused idle button had almost no visible
+           edge against the equally-white panel behind it. This was a real
+           regression this stylesheet introduced (the pre-Stage-A button had
+           no custom border colour at all), not a property of the colour
+           brief. Fixed by giving every button's default border
+           --color-primary-strong too (5.52:1), not just the hover/focus
+           states — the hover rule's own border-color is now redundant with
+           the default but left in place deliberately, so hover stays
+           correct even if the default border colour is ever revisited
+           independently. Decorative, non-interactive borders (the
+           #quit-panel/#newgame-panel grouping divs, the opponent card-back)
+           were deliberately left on --color-border/1.27:1 — WCAG 1.4.11
+           only applies to UI components and meaningful graphical objects,
+           not to static grouping/decoration, so darkening those wasn't
+           needed and would have fought the "ample whitespace, light touch"
+           brief for no accessibility benefit.
+         - button:disabled (opacity: 0.5, unchanged from before Stage A) is
+           explicitly exempt from WCAG 1.4.11's 3:1 requirement (inactive
+           controls are excluded by the spec itself) — checked, not assumed:
+           a 50%-opacity --color-primary-strong border over the page
+           background computes to ~2.03:1, which would fail if disabled
+           controls were in scope, but they aren't.
+         - The brief left secondary/error colours open, to be checked against
+           actual use. #73796F (an earlier candidate) measured 4.13:1 on bg /
+           4.47:1 on surface, short of the 4.5:1 body-text threshold at the
+           small sizes this page actually uses (0.75–0.9rem) — darkened to
+           #5E6459 (5.63:1 on bg, 6.10:1 on surface). #B85D55 (an earlier
+           error candidate) measured 4.44:1 with white text, short of 4.5:1 —
+           darkened to #A8504A (5.37:1 with white text, 4.96:1 as standalone
+           text on --color-bg) for the error banner; the disconnect banner
+           (an already-distinct, more severe state) keeps its own deeper
+           shade, --color-error-strong (8.45:1 with white text), for the same
+           visual separation the original #5a1a1a/#7a4b00 pair had (13.15:1 /
+           7.41:1 respectively). */
+      :root {
+        --color-bg: #f7f6f0;
+        --color-surface: #ffffff;
+        --color-text: #252923;
+        --color-text-secondary: #5e6459;
+        --color-primary: #879c82;
+        --color-primary-subtle: #e8eee5;
+        --color-primary-strong: #5b6e54;
+        --color-accent: #d99a70;
+        --color-border: #e4e5dd;
+        --color-error: #a8504a;
+        --color-error-strong: #7a3a35;
+
+        --space-1: 4px;
+        --space-2: 8px;
+        --space-3: 12px;
+        --space-4: 16px;
+        --space-6: 24px;
+        --space-8: 32px;
+
+        --radius-sm: 6px;
+        --radius-md: 10px;
+        --radius-lg: 16px;
+
+        --font-sans: system-ui, sans-serif;
+      }
       body {
-        font-family: system-ui, sans-serif;
+        font-family: var(--font-sans);
+        background: var(--color-bg);
+        color: var(--color-text);
+        line-height: 1.5;
         max-width: 640px;
         margin: 0 auto;
-        padding: 1rem;
+        padding: var(--space-4);
+      }
+      h1 {
+        font-size: 1.4rem;
+        font-weight: 600;
+        letter-spacing: -0.01em;
+        margin: 0 0 var(--space-2);
+      }
+      a {
+        color: var(--color-text);
+        text-decoration-color: var(--color-accent);
+        text-decoration-thickness: 2px;
+        text-underline-offset: 2px;
+      }
+      a:hover {
+        color: var(--color-primary);
+      }
+      button {
+        font-family: inherit;
+        font-size: 0.9rem;
+        color: var(--color-text);
+        background: var(--color-surface);
+        border: 1px solid var(--color-primary-strong);
+        border-radius: var(--radius-sm);
+        padding: var(--space-2) var(--space-3);
+        cursor: pointer;
+        transition:
+          background-color 0.15s ease,
+          border-color 0.15s ease;
+      }
+      button:hover:not(:disabled) {
+        border-color: var(--color-primary-strong);
+        background: var(--color-primary-subtle);
+      }
+      button:focus-visible {
+        outline: 2px solid var(--color-primary-strong);
+        outline-offset: 1px;
       }
       #identity {
-        color: #555;
+        color: var(--color-text-secondary);
         font-size: 0.9rem;
+      }
+      #lobby-panel,
+      #game-panel {
+        background: var(--color-surface);
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-md);
+        padding: var(--space-4);
+        margin: var(--space-4) 0;
       }
       #disconnect-banner,
       #error-banner {
         display: none;
-        padding: 0.6rem 1rem;
-        border-radius: 4px;
-        margin: 0.5rem 0;
-        font-weight: bold;
+        padding: var(--space-2) var(--space-4);
+        border-radius: var(--radius-sm);
+        margin: var(--space-2) 0;
+        font-weight: 600;
       }
       #disconnect-banner {
-        background: #5a1a1a;
+        background: var(--color-error-strong);
         color: #fff;
       }
       #error-banner {
-        background: #7a4b00;
+        background: var(--color-error);
         color: #fff;
       }
       #status-line {
         font-size: 1.1rem;
-        margin: 0.75rem 0;
+        margin: var(--space-3) 0;
       }
       #series-score {
         font-size: 0.95rem;
-        color: #333;
+        color: var(--color-text-secondary);
       }
       #hp-ap-row {
         display: flex;
-        gap: 1.5rem;
-        margin: 0.5rem 0;
+        gap: var(--space-6);
+        margin: var(--space-2) 0;
         font-variant-numeric: tabular-nums;
       }
       #board {
         display: inline-grid;
-        gap: 2px;
-        margin: 0.75rem 0;
+        gap: var(--space-1);
+        margin: var(--space-3) 0;
+        background: var(--color-border);
+        padding: var(--space-1);
+        border-radius: var(--radius-sm);
       }
       #board button {
         width: 52px;
         height: 52px;
         font-size: 0.8rem;
+        border-radius: var(--radius-sm);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 0;
       }
-      #hand button,
-      #opponent-hand .card-back {
-        width: 60px;
-        height: 36px;
-        margin-right: 4px;
-        margin-bottom: 4px;
+      #board button:disabled {
+        background: var(--color-surface);
+      }
+      /* B3: the type-icon drawn into a placed card's cell (same
+         CARD_TYPE_ICONS set the hand uses) — the cell's own border colour,
+         set inline per-cell by app.js's BOARD_OWNER_COLOR, carries owner
+         instead of text, since a 52px cell has no room for icon + owner +
+         type text together. */
+      #board button svg {
+        display: block;
+        width: 20px;
+        height: 20px;
       }
       #opponent-hand .card-back {
         display: inline-block;
-        background: #ccc;
-        border: 1px solid #888;
-        border-radius: 3px;
+        width: 60px;
+        height: 36px;
+        margin-right: var(--space-1);
+        margin-bottom: var(--space-1);
+        background: var(--color-primary-subtle);
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-sm);
+        overflow: hidden;
+      }
+      /* B1: the fixed diamond pattern drawn into every card-back span by
+         app.js's OPPONENT_CARD_BACK_SVG constant — sized to fill the
+         existing 60x36 box exactly, never changed by card contents. */
+      #opponent-hand .card-back svg {
+        display: block;
+        width: 100%;
+        height: 100%;
+      }
+      /* B2: own hand buttons no longer share a fixed width with the
+         opponent's card-back (that rule above is now independent) — width
+         is intentionally auto, sized by its icon + the full card-type word,
+         so "lightning" (the longest name) renders complete instead of being
+         clipped by a fixed box too narrow for it. Buttons of different
+         lengths wrap naturally inside #hand, same as the browser's default
+         inline flow for any row of variable-width buttons. */
+      #hand button {
+        display: inline-flex;
+        align-items: center;
+        gap: var(--space-2);
+        margin-right: var(--space-1);
+        margin-bottom: var(--space-1);
+      }
+      #hand button svg {
+        display: block;
+        width: 16px;
+        height: 16px;
+        flex: 0 0 auto;
+      }
+      #hand button.selected {
+        border-color: var(--color-primary-strong);
+        background: var(--color-primary-subtle);
       }
       .action-row {
-        margin: 0.75rem 0;
+        margin: var(--space-3) 0;
       }
       .action-row button {
-        margin-right: 0.5rem;
+        margin-right: var(--space-2);
       }
       button:disabled {
         opacity: 0.5;
         cursor: not-allowed;
       }
       #quit-panel {
-        border: 1px solid #999;
-        padding: 0.5rem;
-        margin: 0.5rem 0;
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-sm);
+        padding: var(--space-2);
+        margin: var(--space-2) 0;
         display: none;
       }
       #newgame-panel {
-        border: 1px solid #999;
-        padding: 0.5rem;
-        margin: 0.5rem 0;
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-sm);
+        padding: var(--space-2);
+        margin: var(--space-2) 0;
         display: none;
       }
       details#log-details {
-        margin-top: 1.5rem;
-        color: #555;
+        margin-top: var(--space-6);
+        color: var(--color-text-secondary);
       }
       #log {
         font-size: 0.75rem;
         max-height: 150px;
         overflow-y: auto;
-        background: #f5f5f5;
-        padding: 0.5rem;
+        background: var(--color-primary-subtle);
+        border-radius: var(--radius-sm);
+        padding: var(--space-2);
       }
     </style>
   </head>

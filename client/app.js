@@ -39,6 +39,88 @@ const newGameStatusEl = document.getElementById("newgame-status");
 const newGameBtn = document.getElementById("newgame-btn");
 const logEl = document.getElementById("log");
 
+// B1: a single, fixed pixel-art pattern for every opponent card back,
+// regardless of what's actually in their hand — the server never tells this
+// client what an opponent's cards are (only the count), so this SVG string
+// is a hardcoded constant, never built from `opponent.hand` in any way.
+// Colours reuse Stage A's existing tokens (--color-primary, already the
+// low-saturation base sage) rather than introducing a new one; the span's
+// own background/border/radius (index.html's #opponent-hand .card-back
+// rule) are left untouched, so this draws only the diamond pattern on top.
+const OPPONENT_CARD_BACK_SVG = `
+  <svg viewBox="0 0 60 36" preserveAspectRatio="none" aria-hidden="true" focusable="false">
+    <rect x="24" y="6" width="12" height="6" fill="var(--color-primary)" />
+    <rect x="18" y="12" width="24" height="6" fill="var(--color-primary)" />
+    <rect x="18" y="18" width="24" height="6" fill="var(--color-primary)" />
+    <rect x="24" y="24" width="12" height="6" fill="var(--color-primary)" />
+  </svg>
+`;
+
+// B2: one fixed pixel-art glyph per CardType, purely decorative (the
+// button's own text — the full word "fire"/"lightning"/"water"/"nature" —
+// is what actually gives it an accessible name, see renderHand below) —
+// aria-hidden/focusable=false for the same reason B1's card-back SVG uses
+// them. All four share one 16x16 pixel grid (2px cells) and the same single
+// fill colour (--color-primary, no new token), so type is told apart by
+// silhouette alone, matching this stage's own colour-token constraint.
+const CARD_TYPE_ICONS = {
+  fire: `
+    <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+      <rect x="7" y="1" width="2" height="2" fill="var(--color-primary)" />
+      <rect x="6" y="3" width="4" height="2" fill="var(--color-primary)" />
+      <rect x="5" y="5" width="2" height="2" fill="var(--color-primary)" />
+      <rect x="9" y="5" width="2" height="2" fill="var(--color-primary)" />
+      <rect x="5" y="7" width="6" height="2" fill="var(--color-primary)" />
+      <rect x="4" y="9" width="8" height="2" fill="var(--color-primary)" />
+      <rect x="5" y="11" width="6" height="2" fill="var(--color-primary)" />
+      <rect x="6" y="13" width="4" height="2" fill="var(--color-primary)" />
+    </svg>
+  `,
+  lightning: `
+    <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+      <rect x="9" y="1" width="3" height="2" fill="var(--color-primary)" />
+      <rect x="7" y="3" width="3" height="2" fill="var(--color-primary)" />
+      <rect x="5" y="5" width="3" height="2" fill="var(--color-primary)" />
+      <rect x="3" y="7" width="5" height="2" fill="var(--color-primary)" />
+      <rect x="6" y="9" width="3" height="2" fill="var(--color-primary)" />
+      <rect x="8" y="11" width="3" height="2" fill="var(--color-primary)" />
+      <rect x="6" y="13" width="3" height="2" fill="var(--color-primary)" />
+    </svg>
+  `,
+  water: `
+    <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+      <rect x="7" y="1" width="2" height="2" fill="var(--color-primary)" />
+      <rect x="6" y="3" width="4" height="2" fill="var(--color-primary)" />
+      <rect x="5" y="5" width="6" height="2" fill="var(--color-primary)" />
+      <rect x="4" y="7" width="8" height="2" fill="var(--color-primary)" />
+      <rect x="4" y="9" width="8" height="2" fill="var(--color-primary)" />
+      <rect x="5" y="11" width="6" height="2" fill="var(--color-primary)" />
+      <rect x="6" y="13" width="4" height="2" fill="var(--color-primary)" />
+    </svg>
+  `,
+  nature: `
+    <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+      <rect x="10" y="1" width="2" height="2" fill="var(--color-primary)" />
+      <rect x="8" y="3" width="4" height="2" fill="var(--color-primary)" />
+      <rect x="6" y="5" width="4" height="2" fill="var(--color-primary)" />
+      <rect x="4" y="7" width="4" height="2" fill="var(--color-primary)" />
+      <rect x="4" y="9" width="4" height="2" fill="var(--color-primary)" />
+      <rect x="6" y="11" width="4" height="2" fill="var(--color-primary)" />
+      <rect x="6" y="13" width="2" height="2" fill="var(--color-primary)" />
+    </svg>
+  `,
+};
+
+// B3: which CSS colour token marks a placed card as belonging to A vs B on
+// the board — reuses CARD_TYPE_ICONS for the type glyph itself (same icon
+// set as the hand, so a card looks the same wherever it's shown) and adds
+// only the owner's border colour, no new tokens. Both values already exist
+// in index.html's :root and are already contrast-verified there.
+const BOARD_OWNER_COLOR = {
+  A: "var(--color-primary-strong)",
+  B: "var(--color-accent)",
+};
+
 function log(message) {
   logEl.textContent += message + "\n";
   logEl.scrollTop = logEl.scrollHeight;
@@ -195,7 +277,22 @@ function renderBoard(state) {
     for (let c = 0; c < size; c++) {
       const cell = state.board[r][c];
       const button = document.createElement("button");
-      button.textContent = cell ? `${cell.owner}:${cell.type.slice(0, 2)}` : "";
+      // B3: a placed card shows only its type icon (same CARD_TYPE_ICONS set
+      // the hand already uses, so a card reads the same wherever it's
+      // shown) plus a border coloured by owner — no text in the cell itself,
+      // the 52px cell has no room for icon + owner + type text together
+      // (confirmed by measuring the rendered board, not assumed). The
+      // owner/type info this used to show as "A:fi" text now lives only in
+      // aria-label, so a screen reader or anyone not relying on the icon's
+      // shape/colour alone still gets the real content, not just a coloured
+      // square with no label.
+      if (cell) {
+        button.innerHTML = CARD_TYPE_ICONS[cell.type];
+        button.style.borderColor = BOARD_OWNER_COLOR[cell.owner];
+        button.setAttribute("aria-label", `Player ${cell.owner}'s ${cell.type} card`);
+      } else {
+        button.setAttribute("aria-label", "Empty cell");
+      }
       // A filled cell, or it not being your turn, or no card selected yet,
       // all disable the button — the server would reject the action anyway
       // in every one of those cases, this just avoids sending a request that
@@ -214,9 +311,14 @@ function renderBoard(state) {
 function renderOpponentHand(opponent) {
   oppHandCountEl.textContent = String(opponent.hand.length);
   opponentHandEl.innerHTML = "";
+  // `opponent.hand.length` is the only thing read from the real hand here —
+  // the loop body never looks at what's actually in it, so every back gets
+  // the exact same fixed pattern regardless of hand contents (see
+  // OPPONENT_CARD_BACK_SVG's own comment).
   for (let i = 0; i < opponent.hand.length; i++) {
     const back = document.createElement("span");
     back.className = "card-back";
+    back.innerHTML = OPPONENT_CARD_BACK_SVG;
     opponentHandEl.appendChild(back);
   }
 }
@@ -226,8 +328,14 @@ function renderHand(state, me) {
   handEl.innerHTML = "";
   me.hand.forEach((card, index) => {
     const button = document.createElement("button");
-    button.textContent = card;
-    button.style.fontWeight = index === selectedHandIndex ? "bold" : "normal";
+    // B2: icon is purely decorative (aria-hidden, see CARD_TYPE_ICONS'
+    // own comment) — the trailing text node, the full card-type word
+    // itself, is what still gives this button its accessible name, same
+    // as before this stage. `card` (the server-sent CardType string) is
+    // unchanged and still what's read on click below.
+    button.innerHTML = CARD_TYPE_ICONS[card];
+    button.appendChild(document.createTextNode(card));
+    button.classList.toggle("selected", index === selectedHandIndex);
     button.disabled = !myTurn;
     button.addEventListener("click", () => {
       selectedHandIndex = index;
