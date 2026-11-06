@@ -61,7 +61,7 @@ interface SeriesScore {
 }
 
 interface ServerMessage {
-  type: "identity" | "assigned" | "waiting" | "queued" | "state" | "seriesEnded" | "error";
+  type: "identity" | "assigned" | "waiting" | "queued" | "state" | "combatEvent" | "seriesEnded" | "error";
   displayId?: string;
   player?: "A" | "B";
   reason?: string;
@@ -191,6 +191,30 @@ it("enforces turn order and leaves state unchanged on a rejected action", async 
   expect(newMessages).toHaveLength(1);
   expect(newMessages[0].type).toBe("error");
   expect(newMessages[0].message).toMatch(/turn/);
+});
+
+it("never sends a combatEvent for a legal action that forms no Combo", async () => {
+  // Reaching a real Combo deterministically over this transport isn't
+  // practical (real random hands, same already-established limitation this
+  // file's own top comment notes for finished/locked games) — but an
+  // ordinary Draw, which can never itself form a Combo, is fully
+  // deterministic and exercises the "no event when nothing happened" side
+  // of the contract.
+  const state = lastState(a.messages);
+  if (!state) throw new Error("expected a state after pairing");
+  const actor = state.currentPlayer === "A" ? a : b;
+  const other = actor === a ? b : a;
+  const actorCountBefore = actor.messages.length;
+  const otherCountBefore = other.messages.length;
+
+  send(actor.ws, { type: "draw" });
+  await wait(200);
+
+  const actorNew = actor.messages.slice(actorCountBefore);
+  const otherNew = other.messages.slice(otherCountBefore);
+  expect(actorNew.some((m) => m.type === "combatEvent")).toBe(false);
+  expect(otherNew.some((m) => m.type === "combatEvent")).toBe(false);
+  expect(actorNew.some((m) => m.type === "state")).toBe(true);
 });
 
 it("rejects confirmNewGame while the game is still active", async () => {

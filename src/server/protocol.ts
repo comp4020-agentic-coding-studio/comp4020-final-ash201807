@@ -1,4 +1,4 @@
-import type { GameState, PlayerId } from "../game/types.ts";
+import type { CombatEvent, GameState, PlayerId } from "../game/types.ts";
 
 // Stage 5: the running best-of-three score, alongside whichever individual
 // GameState is currently being shown — server-level bookkeeping the engine
@@ -28,6 +28,14 @@ export type ServerMessage =
   // visitor is no longer rejected outright, so that message is now
   // unreachable and has been removed rather than left as dead protocol.
   | { type: "queued" }
+  // Combat Events: sent once per Play that formed at least one Combo,
+  // immediately before the "state" broadcast for the same Play — never
+  // persisted, never replayed on reconnect (see server.ts's broadcastState,
+  // which only ever sends "state"). Purely a one-shot cause/effect
+  // explanation for the HP/hand/AP change the following "state" message
+  // already carries; a client that ignores this message entirely still ends
+  // up with fully correct game state.
+  | { type: "combatEvent"; event: CombatEvent }
   | { type: "state"; state: GameState; series: SeriesScore }
   // Stage 4b: a seated session's series ended by forfeit rather than by
   // ordinary play — sent only to the survivor (the opponent whose grace

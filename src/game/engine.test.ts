@@ -572,6 +572,92 @@ describe("Fire effect (Stage 8c)", () => {
   });
 });
 
+describe("Combat Events", () => {
+  it("returns null when the Play forms no Combo at all", () => {
+    const state = makeState({ ap: 2, currentPlayer: "A" });
+    place(state, "A", "fire", 0, 0);
+    place(state, "B", "water", 0, 1);
+    state.players.A.hand = ["nature"];
+
+    const { combatEvent } = playCard(state, "A", 0, 0, 2);
+
+    expect(combatEvent).toBeNull();
+  });
+
+  it("records an Owner Combo's 15 damage, attributed to the acting player, no effect", () => {
+    const state = makeState({ ap: 2, currentPlayer: "A" });
+    place(state, "A", "lightning", 0, 0);
+    place(state, "A", "lightning", 0, 1);
+    state.players.A.hand = ["lightning"];
+
+    const { combatEvent } = playCard(state, "A", 0, 0, 2);
+
+    expect(combatEvent).not.toBeNull();
+    expect(combatEvent!.actingPlayer).toBe("A");
+    expect(combatEvent!.combos).toHaveLength(1);
+    expect(combatEvent!.combos[0].ownerMatch).toBe(true);
+    expect(combatEvent!.combos[0].damage).toBe(15);
+    expect(combatEvent!.fireBonusDamage).toBe(0);
+    expect(combatEvent!.effectsApplied).toEqual(["lightning"]);
+  });
+
+  it("records a Type-only Combo's 5 damage, no effect for a mixed third type", () => {
+    const state = makeState({ ap: 2, currentPlayer: "A" });
+    place(state, "A", "lightning", 0, 0);
+    place(state, "B", "lightning", 0, 1);
+    state.players.A.hand = ["lightning"];
+
+    const { combatEvent } = playCard(state, "A", 0, 0, 2);
+
+    expect(combatEvent!.combos).toHaveLength(1);
+    expect(combatEvent!.combos[0].ownerMatch).toBe(false);
+    expect(combatEvent!.combos[0].damage).toBe(5);
+    expect(combatEvent!.effectsApplied).toEqual(["lightning"]);
+  });
+
+  it("includes the Fire effect's own bonus damage separately from base combo damage", () => {
+    const state = makeState({ ap: 2, currentPlayer: "A" });
+    place(state, "A", "fire", 0, 0);
+    place(state, "A", "fire", 0, 1);
+    state.players.A.hand = ["fire"];
+
+    const { combatEvent } = playCard(state, "A", 0, 0, 2);
+
+    expect(combatEvent!.combos[0].damage).toBe(15);
+    expect(combatEvent!.fireBonusDamage).toBe(10);
+    expect(combatEvent!.effectsApplied).toEqual(["fire"]);
+  });
+
+  it("records every independent combo from a single Play, each with its own damage", () => {
+    const state = makeState({ ap: 2, currentPlayer: "A" });
+    place(state, "A", "lightning", 0, 0);
+    place(state, "A", "lightning", 0, 1);
+    place(state, "A", "lightning", 1, 1);
+    place(state, "A", "lightning", 2, 1);
+    state.players.A.hand = ["lightning"];
+
+    const { combatEvent } = playCard(state, "A", 0, 0, 2);
+
+    expect(combatEvent!.combos).toHaveLength(2);
+    expect(combatEvent!.combos.every((c) => c.damage === 15)).toBe(true);
+    expect(combatEvent!.effectsApplied).toEqual(["lightning", "lightning"]);
+  });
+
+  it("still returns the Combat Event for the finishing Play, even when the game ends lethally", () => {
+    const state = makeState({ ap: 2, currentPlayer: "A" });
+    state.players.B.hp = 10;
+    place(state, "A", "lightning", 0, 0);
+    place(state, "A", "lightning", 0, 1);
+    state.players.A.hand = ["lightning"];
+
+    const { combatEvent } = playCard(state, "A", 0, 0, 2);
+
+    expect(state.status).toBe("finished");
+    expect(combatEvent).not.toBeNull();
+    expect(combatEvent!.combos[0].damage).toBe(15);
+  });
+});
+
 // A verified "no accidental Combo" layout for a fully-occupied 3x3 region —
 // zero lines (row/col/diagonal) share an owner OR a type across all 3 cells.
 // Verified by script, not by hand: the 2nd playtesting revision means a

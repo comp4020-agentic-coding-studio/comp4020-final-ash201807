@@ -42,6 +42,7 @@ const connectionStatusEl = document.getElementById("connection-status");
 const connectionStatusTextEl = document.getElementById("connection-status-text");
 const myHpBarEl = document.getElementById("my-hp-bar");
 const oppHpBarEl = document.getElementById("opp-hp-bar");
+const combatEventBanner = document.getElementById("combat-event-banner");
 
 // Display-only scale for the HP bar. The server doesn't send max HP; this
 // mirrors engine.ts's STARTING_HP and must be updated if that changes. HP
@@ -97,6 +98,34 @@ function showError(message) {
   }, 5000);
 }
 
+// Combat Events: a one-shot cause/effect card for the Combo(s) a Play just
+// resolved, built entirely from the server's own combatEvent message — this
+// client never infers or recomputes Combo type/damage/effects itself (the
+// server already did, in engine.ts's applyCombos). Fades on a fixed timeout,
+// same pattern as showError above; a later state broadcast's own render()
+// never depends on this banner, so it's safe to let it expire on its own
+// clock.
+const EFFECT_LABELS = { lightning: "Lightning", water: "Water", nature: "Nature", fire: "Fire" };
+let combatEventTimeout = null;
+function showCombatEvent(event) {
+  const whoActed = event.actingPlayer === myPlayer ? "You" : "Your opponent";
+  const totalDamage =
+    event.combos.reduce((sum, c) => sum + c.damage, 0) + event.fireBonusDamage;
+  const comboWord = event.combos.length > 1 ? "combos" : "combo";
+  const kinds = event.combos.map((c) => (c.ownerMatch ? "Owner" : "Type")).join(" + ");
+  let text = `${whoActed} completed ${event.combos.length} ${kinds} ${comboWord} for ${totalDamage} damage.`;
+  if (event.effectsApplied.length > 0) {
+    const effectWords = event.effectsApplied.map((e) => EFFECT_LABELS[e]);
+    text += ` Effect: ${effectWords.join(", ")}.`;
+  }
+  combatEventBanner.textContent = text;
+  setVisible(combatEventBanner, true);
+  clearTimeout(combatEventTimeout);
+  combatEventTimeout = setTimeout(() => {
+    setVisible(combatEventBanner, false);
+  }, 4000);
+}
+
 const protocol = location.protocol === "https:" ? "wss:" : "ws:";
 const ws = new WebSocket(`${protocol}//${location.host}/ws`);
 
@@ -145,6 +174,8 @@ ws.addEventListener("message", (event) => {
     setVisible(gamePanel, false);
     setVisible(joinQueueBtn, false);
     statusLine.textContent = "In queue — waiting for an opponent...";
+  } else if (message.type === "combatEvent") {
+    showCombatEvent(message.event);
   } else if (message.type === "state") {
     lastState = message.state;
     lastSeries = message.series;
@@ -153,6 +184,8 @@ ws.addEventListener("message", (event) => {
     myPlayer = null;
     lastState = null;
     lastSeries = null;
+    clearTimeout(combatEventTimeout);
+    setVisible(combatEventBanner, false);
     setVisible(gamePanel, false);
     setVisible(lobbyPanel, true);
     setVisible(joinQueueBtn, true);

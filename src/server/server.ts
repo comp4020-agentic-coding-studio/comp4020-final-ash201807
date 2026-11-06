@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { createServer as createHttpServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { WebSocketServer, type WebSocket } from "ws";
 import { confirmNewGame, createInitialState, drawCard, endTurn, playCard, rejectQuit, requestQuit } from "../game/engine.ts";
-import type { GameState, PlayerId } from "../game/types.ts";
+import type { CombatEvent, GameState, PlayerId } from "../game/types.ts";
 import { parseSessionId, sessionCookieHeader } from "./cookies.ts";
 import { displayIdFor } from "./identity.ts";
 import { logEvent } from "./log.ts";
@@ -129,6 +129,21 @@ export function createServer(persistence: Persistence, options: ServerOptions = 
     for (const [ws, sessionId] of sockets) {
       if (appState.sessions[sessionId]?.seriesId === seriesId) {
         send(ws, { type: "state", state: game, series: seriesScore(series) });
+      }
+    }
+  }
+
+  // Combat Events: same recipient filtering as broadcastState (every socket
+  // currently bound to this seriesId, never a stray socket from an unrelated
+  // concurrent series) — sent once per Play that formed at least one Combo,
+  // always immediately before that same Play's "state" broadcast so a client
+  // has the cause before the effect. Never persisted (see protocol.ts's own
+  // comment) — a reconnect only ever gets a fresh "state", never a replayed
+  // combatEvent.
+  function broadcastCombatEvent(seriesId: string, event: CombatEvent): void {
+    for (const [ws, sessionId] of sockets) {
+      if (appState.sessions[sessionId]?.seriesId === seriesId) {
+        send(ws, { type: "combatEvent", event });
       }
     }
   }
@@ -448,9 +463,13 @@ export function createServer(persistence: Persistence, options: ServerOptions = 
         }
 
         const statusBefore = game.status;
+        // Set only by the "play" branch below, and only when that Play
+        // formed at least one Combo — every other action leaves this null,
+        // so no combatEvent is ever broadcast for a non-Play action.
+        let combatEvent: CombatEvent | null = null;
         try {
           if (message.type === "play") {
-            playCard(game, seatedPlayer, message.handIndex, message.row, message.col);
+            ({ combatEvent } = playCard(game, seatedPlayer, message.handIndex, message.row, message.col));
           } else if (message.type === "draw") {
             drawCard(game, seatedPlayer);
           } else if (message.type === "endTurn") {
@@ -497,6 +516,13 @@ export function createServer(persistence: Persistence, options: ServerOptions = 
           return;
         }
         logEvent({ event: "action_accepted", displayId, seriesId, action: message.type });
+
+        // Combat Events: broadcast before any series-conclusion handling
+        // below, so both players see the cause (which combos, which
+        // effects) even on the same Play that ends the series outright —
+        // the event describes what this Play's Combos did, independent of
+        // whatever happens to the series as a result.
+        if (combatEvent) broadcastCombatEvent(seriesId, combatEvent);
 
         // The game this action acted on just concluded (it wasn't already
         // concluded before this action — confirmNewGame's own "cannot start

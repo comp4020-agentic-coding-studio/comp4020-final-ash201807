@@ -70,3 +70,34 @@ export interface Combo {
   // ownerMatch is false, caps damage at 5 instead of 15.
   sameType: CardType | null;
 }
+
+// Combat Events (Stage: Combat Events). The public-safe digest of what one
+// Play's applyCombos() (engine.ts) computed — surfaced so a client can show
+// *why* HP/hand/AP changed, not just the new numbers. Built once per Play
+// that formed at least one Combo (see engine.ts's playCard, which returns
+// CombatEvent | null); never produced for a Play that formed none. Every
+// field here is already public board/damage information read off of
+// placed cards already sent in full inside GameState.board — nothing here
+// ever exposes either player's hidden hand.
+export interface CombatEvent {
+  actingPlayer: PlayerId;
+  combos: Array<{
+    cells: Array<[number, number]>;
+    ownerMatch: boolean;
+    sameType: CardType | null;
+    // This one combo's own base damage (15 Owner, 5 Type-only) — summed
+    // across the array is the same total engine.ts's own damage formula
+    // already applies to the opponent, just itemised per combo rather than
+    // collapsed into one number.
+    damage: number;
+  }>;
+  // Summed across every combo in this event that also carried a Fire effect
+  // (engine.ts's own stacking rule: two simultaneous Fire combos is 2x10) —
+  // 0 when no Fire effect fired at all.
+  fireBonusDamage: number;
+  // One entry per combo that triggered a same-type effect, in the same
+  // order applyCombos() itself iterates them — two simultaneous Water
+  // combos means two "water" entries here, matching the stacking behaviour
+  // engine.test.ts already covers for Lightning/Nature/Fire.
+  effectsApplied: CardType[];
+}

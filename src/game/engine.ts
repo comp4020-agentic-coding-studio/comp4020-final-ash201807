@@ -3,7 +3,7 @@
 // server/session/persistence code calls these and owns broadcasting and
 // saving the result.
 import { randomCard, pickFirstPlayer, type RandomSource } from "./rng.ts";
-import type { Cell, Combo, GameState, PlacedCard, PlayerId } from "./types.ts";
+import type { CardType, Cell, Combo, CombatEvent, GameState, PlacedCard, PlayerId } from "./types.ts";
 
 const MAIN_BOARD_SIZE = 3;
 const EXPANSION_BOARD_SIZE = 5;
@@ -214,71 +214,97 @@ function unionCells(combos: Combo[]): Array<[number, number]> {
 // a lethal Play skips whatever's left entirely, combo count aside — whether
 // the kill lands in Phase 4 (base damage) or, since the Fire redesign
 // (Stage 8c), partway through Phase 5 (Fire's own bonus damage).
-function applyCombos(state: GameState, actingPlayer: PlayerId, random: RandomSource): Combo[] {
+//
+// Combat Events: returns a public-safe digest of what this Play's combos did
+// (CombatEvent, see types.ts), or null when this Play formed no combo at
+// all — distinct from a combo existing but dealing 0 net effect, which never
+// happens (every detected combo deals at least TYPE_ONLY_COMBO_DAMAGE). The
+// returned event mirrors the per-combo damage actually applied above —
+// itemised rather than collapsed into one number — plus the same-type
+// effects actually triggered, in the same order Phase 5 applies them. Built
+// from data already computed above, not recomputed independently, so it can
+// never drift from what `state` actually received.
+function applyCombos(state: GameState, actingPlayer: PlayerId, random: RandomSource): CombatEvent | null {
   const combos = detectCombos(state.board); // Phase 1
 
-  if (combos.length > 0) {
-    const opponent = otherPlayer(actingPlayer);
-
-    // Phase 2 + 3: an Owner Combo deals 15 regardless of its type (the
-    // attack values in §4 are all 5, times 3 cards) — including when it's
-    // ALSO a same-type Combo, counted once, not 15+5. A same-type-only
-    // Combo (mixed owner) deals 5. Always credited to actingPlayer, who —
-    // whichever kind of Combo this is — is necessarily whoever just placed
-    // the card completing it (see detectCombos: a Combo surviving to be
-    // detected here was cleared, if it existed, on every prior Play, so it
-    // can only be newly complete because of this one). All combos from this
-    // Play summed and applied at once.
-    const damage = combos.reduce(
-      (sum, combo) => sum + (combo.ownerMatch ? OWNER_COMBO_DAMAGE : TYPE_ONLY_COMBO_DAMAGE),
-      0,
-    );
-    state.players[opponent].hp -= damage;
-
-    // Phase 4: a lethal HP ends the game immediately — Phases 5-7 (effects,
-    // clearing, board/expansion update) do not run on the finishing Play.
-    if (state.players[opponent].hp <= 0) {
-      state.status = "finished";
-      state.winner = actingPlayer;
-      return combos;
+  if (combos.length === 0) {
+    updateBoard(state); // Phase 7
+    if (state.status === "active" && isBoardFull(state.board)) {
+      state.status = "locked";
     }
+    return null;
+  }
 
-    // Phase 5: effects, one application per combo that also carries a
-    // same-type bonus (a mixed-type combo deals its damage but triggers
-    // nothing here) — confirmed stacking, so two simultaneous same-type
-    // Lightning combos is two stacked -1 AP hits, two simultaneous same-type
-    // Nature combos is +2 AP this same turn, etc.
-    for (const combo of combos) {
-      if (combo.sameType === "lightning") {
-        state.pendingLightning[opponent] += 1;
-      } else if (combo.sameType === "water") {
-        for (let i = 0; i < WATER_DRAW_COUNT; i++) {
-          state.players[actingPlayer].hand.push(randomCard(random));
-        }
-      } else if (combo.sameType === "nature") {
-        state.ap += NATURE_AP_BONUS;
-      } else if (combo.sameType === "fire") {
-        // Fire is the first Phase 5 effect that can itself deal damage, so —
-        // unlike the other three, which can never turn a non-lethal Play
-        // lethal — it needs its own lethal check, same as Phase 4's: "first
-        // to 0 HP loses outright" (README) has to hold the moment it's
-        // crossed, not just right after the base damage in Phase 2+3. Any
-        // later combos in this same Play (and Phases 6-7) are skipped, same
-        // as an ordinary Phase 4 finish.
-        state.players[opponent].hp -= FIRE_EFFECT_DAMAGE;
-        if (state.players[opponent].hp <= 0) {
-          state.status = "finished";
-          state.winner = actingPlayer;
-          return combos;
-        }
+  const opponent = otherPlayer(actingPlayer);
+  const comboEvents = combos.map((combo) => ({
+    cells: combo.cells,
+    ownerMatch: combo.ownerMatch,
+    sameType: combo.sameType,
+    damage: combo.ownerMatch ? OWNER_COMBO_DAMAGE : TYPE_ONLY_COMBO_DAMAGE,
+  }));
+  let fireBonusDamage = 0;
+  const effectsApplied: CardType[] = [];
+
+  // Phase 2 + 3: an Owner Combo deals 15 regardless of its type (the
+  // attack values in §4 are all 5, times 3 cards) — including when it's
+  // ALSO a same-type Combo, counted once, not 15+5. A same-type-only
+  // Combo (mixed owner) deals 5. Always credited to actingPlayer, who —
+  // whichever kind of Combo this is — is necessarily whoever just placed
+  // the card completing it (see detectCombos: a Combo surviving to be
+  // detected here was cleared, if it existed, on every prior Play, so it
+  // can only be newly complete because of this one). All combos from this
+  // Play summed and applied at once.
+  const damage = comboEvents.reduce((sum, c) => sum + c.damage, 0);
+  state.players[opponent].hp -= damage;
+
+  // Phase 4: a lethal HP ends the game immediately — Phases 5-7 (effects,
+  // clearing, board/expansion update) do not run on the finishing Play.
+  if (state.players[opponent].hp <= 0) {
+    state.status = "finished";
+    state.winner = actingPlayer;
+    return { actingPlayer, combos: comboEvents, fireBonusDamage, effectsApplied };
+  }
+
+  // Phase 5: effects, one application per combo that also carries a
+  // same-type bonus (a mixed-type combo deals its damage but triggers
+  // nothing here) — confirmed stacking, so two simultaneous same-type
+  // Lightning combos is two stacked -1 AP hits, two simultaneous same-type
+  // Nature combos is +2 AP this same turn, etc.
+  for (const combo of combos) {
+    if (combo.sameType === "lightning") {
+      state.pendingLightning[opponent] += 1;
+      effectsApplied.push("lightning");
+    } else if (combo.sameType === "water") {
+      for (let i = 0; i < WATER_DRAW_COUNT; i++) {
+        state.players[actingPlayer].hand.push(randomCard(random));
+      }
+      effectsApplied.push("water");
+    } else if (combo.sameType === "nature") {
+      state.ap += NATURE_AP_BONUS;
+      effectsApplied.push("nature");
+    } else if (combo.sameType === "fire") {
+      // Fire is the first Phase 5 effect that can itself deal damage, so —
+      // unlike the other three, which can never turn a non-lethal Play
+      // lethal — it needs its own lethal check, same as Phase 4's: "first
+      // to 0 HP loses outright" (README) has to hold the moment it's
+      // crossed, not just right after the base damage in Phase 2+3. Any
+      // later combos in this same Play (and Phases 6-7) are skipped, same
+      // as an ordinary Phase 4 finish.
+      state.players[opponent].hp -= FIRE_EFFECT_DAMAGE;
+      fireBonusDamage += FIRE_EFFECT_DAMAGE;
+      effectsApplied.push("fire");
+      if (state.players[opponent].hp <= 0) {
+        state.status = "finished";
+        state.winner = actingPlayer;
+        return { actingPlayer, combos: comboEvents, fireBonusDamage, effectsApplied };
       }
     }
+  }
 
-    // Phase 6: clear every cell that took part in any combo this Play (the
-    // union, so a shared card is cleared once, not twice).
-    for (const [r, c] of unionCells(combos)) {
-      state.board[r][c] = null;
-    }
+  // Phase 6: clear every cell that took part in any combo this Play (the
+  // union, so a shared card is cleared once, not twice).
+  for (const [r, c] of unionCells(combos)) {
+    state.board[r][c] = null;
   }
 
   updateBoard(state); // Phase 7
@@ -290,7 +316,7 @@ function applyCombos(state: GameState, actingPlayer: PlayerId, random: RandomSou
     state.status = "locked";
   }
 
-  return combos;
+  return { actingPlayer, combos: comboEvents, fireBonusDamage, effectsApplied };
 }
 
 export function createInitialState(random: RandomSource = Math.random): GameState {
@@ -325,7 +351,7 @@ export function playCard(
   row: number,
   col: number,
   random: RandomSource = Math.random,
-): GameState {
+): { state: GameState; combatEvent: CombatEvent | null } {
   if (state.status !== "active") throw new Error("game is already finished");
   if (state.currentPlayer !== playerId) throw new Error("not this player's turn");
   if (state.ap < PLAY_COST) throw new Error("not enough AP to play");
@@ -341,10 +367,10 @@ export function playCard(
   state.board[row][col] = { owner: playerId, type: card };
   state.ap -= PLAY_COST;
 
-  applyCombos(state, playerId, random);
+  const combatEvent = applyCombos(state, playerId, random);
 
   if (state.status === "active") settleZeroApTurns(state);
-  return state;
+  return { state, combatEvent };
 }
 
 export function drawCard(state: GameState, playerId: PlayerId, random: RandomSource = Math.random): GameState {
