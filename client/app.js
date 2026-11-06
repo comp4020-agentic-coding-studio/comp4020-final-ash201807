@@ -126,7 +126,28 @@ function showCombatEvent(event) {
   combatEventTimeout = setTimeout(() => {
     setVisible(combatEventBanner, false);
   }, 4000);
+
+  // Stage 4 (Combo Animation): this message always arrives BEFORE the
+  // "state" broadcast for the same Play (server.ts's own ordering), so the
+  // combo'd cells are already cleared by the time the NEXT render() rebuilds
+  // the board from the new state — there is nothing left in `state.board`
+  // at those coordinates to animate a "disappearing card" from. Rather than
+  // reconstruct the pre-clear board just to animate it, this flashes the
+  // now-empty cells themselves (still a correct "something happened here"
+  // signal, driven entirely by the event's own coordinates, never
+  // re-derived client-side) plus a floating damage number near the
+  // defender's HP — queued here and consumed exactly once by the next
+  // renderBoard() call, then cleared, so a later unrelated re-render (e.g.
+  // a window resize forcing nothing to actually change) never replays it.
+  pendingComboAnimation = event;
 }
+
+// One flash colour per effect, reusing this file's existing CSS tokens —
+// never a new hue. A pure Owner Combo with no type match (effectsApplied
+// empty) gets the neutral default border colour instead of a specific
+// element tint.
+const EFFECT_FLASH_CLASS = { lightning: "combo-flash--lightning", water: "combo-flash--water", nature: "combo-flash--nature", fire: "combo-flash--fire" };
+let pendingComboAnimation = null;
 
 const protocol = location.protocol === "https:" ? "wss:" : "ws:";
 const ws = new WebSocket(`${protocol}//${location.host}/ws`);
@@ -341,6 +362,72 @@ function renderBoard(state) {
       boardEl.appendChild(button);
     }
   }
+
+  playComboAnimation(size);
+}
+
+// Stage 4 (Combo Animation): consumes pendingComboAnimation exactly once —
+// cleared immediately so a later unrelated re-render never replays it. The
+// animated cells are read directly off the event's own combos[].cells
+// (already-cleared-by-now coordinates, see showCombatEvent's own comment),
+// never re-derived from board contents. One flash colour per combo, keyed
+// by that combo's own sameType (null -> the neutral default, no specific
+// element to attribute the flash to).
+function playComboAnimation(renderedBoardSize) {
+  const event = pendingComboAnimation;
+  pendingComboAnimation = null;
+  if (!event) return;
+  // event.boardSize is the board size the combo's cells were computed
+  // against (engine.ts's own applyCombos, captured before any same-Play
+  // expand/shrink) — if that doesn't match the board size actually being
+  // rendered now, the coordinates refer to a DIFFERENT grid than the one on
+  // screen (e.g. a combo that completed just as the Main Board shrank back
+  // to 3x3 in that same Play, see engine.test.ts's own confirmed case).
+  // Skipping the animation entirely here is correct and safe: it would
+  // otherwise risk flashing the wrong cells rather than the right ones, and
+  // this is purely decorative — the combat-event banner's own text already
+  // carries the full, correct information regardless.
+  if (event.boardSize !== renderedBoardSize) return;
+
+  for (const combo of event.combos) {
+    const flashClass = combo.sameType ? EFFECT_FLASH_CLASS[combo.sameType] : "combo-flash";
+    for (const [r, c] of combo.cells) {
+      const index = r * renderedBoardSize + c;
+      const button = boardEl.children[index];
+      if (!button) continue;
+      button.classList.add(flashClass);
+      // Let the animation run once then clean up the class — a later
+      // unrelated render() already rebuilds this button from scratch
+      // anyway, so this is just tidiness for the in-between moment.
+      button.addEventListener(
+        "animationend",
+        () => button.classList.remove(flashClass),
+        { once: true },
+      );
+    }
+  }
+
+  const totalDamage = event.combos.reduce((sum, c) => sum + c.damage, 0) + event.fireBonusDamage;
+  const defenderBarEl = event.actingPlayer === myPlayer ? oppHpBarEl : myHpBarEl;
+  showDamagePop(defenderBarEl, totalDamage);
+}
+
+// A floating "-N" number near the defender's HP bar, purely decorative
+// (aria-hidden — the combat-event banner's own text already carries the
+// same number accessibly). Appended next to the bar, removed once its own
+// CSS animation finishes; prefers-reduced-motion disables the float/fade
+// keyframes (see index.html) but the element still appears and
+// self-removes on a fixed timeout instead, so the number is never
+// permanently lost, only its motion.
+function showDamagePop(anchorEl, amount) {
+  const pop = document.createElement("span");
+  pop.className = "damage-pop";
+  pop.textContent = `-${amount}`;
+  pop.setAttribute("aria-hidden", "true");
+  anchorEl.parentElement.appendChild(pop);
+  const remove = () => pop.remove();
+  pop.addEventListener("animationend", remove, { once: true });
+  setTimeout(remove, 1500); // fallback for prefers-reduced-motion (no animationend fires)
 }
 
 function renderOpponentHand(opponent) {

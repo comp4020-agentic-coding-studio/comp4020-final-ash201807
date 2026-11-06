@@ -214,6 +214,22 @@
           /* !important: this block precedes the base .selected rule. */
           transform: none !important;
         }
+        /* Stage 4 (Combo Animation): disables both the cell-flash pulse and
+           the damage-pop's float/fade — app.js's own showDamagePop still
+           appends and removes the element on a fixed timeout either way, so
+           the number is never lost, only its motion. */
+        #board button.combo-flash,
+        #board button.combo-flash--lightning,
+        #board button.combo-flash--water,
+        #board button.combo-flash--nature,
+        #board button.combo-flash--fire,
+        .damage-pop {
+          animation: none !important;
+        }
+        .damage-pop {
+          opacity: 1 !important;
+          transform: none !important;
+        }
       }
       #identity {
         color: var(--color-text-secondary);
@@ -290,6 +306,35 @@
       }
       .lobby-ready .btn--primary {
         width: 100%;
+      }
+      /* Stage 4 (Onboarding): plain <details>, same disclosure pattern as the
+         existing #log-details debug panel — collapsed by default so a
+         returning player isn't forced past it, expandable for a first-timer. */
+      .onboarding {
+        margin-top: var(--space-4);
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-md);
+        padding: var(--space-3) var(--space-4);
+      }
+      .onboarding summary {
+        font-weight: 600;
+        cursor: pointer;
+      }
+      .onboarding-body {
+        margin-top: var(--space-3);
+        color: var(--color-text-secondary);
+        font-size: 0.9rem;
+        line-height: 1.6;
+      }
+      .onboarding-body p {
+        margin: 0 0 var(--space-2);
+      }
+      .onboarding-body ul {
+        margin: 0 0 var(--space-2);
+        padding-left: var(--space-6);
+      }
+      .onboarding-body li {
+        margin-bottom: var(--space-1);
       }
       .game {
         display: flex;
@@ -415,6 +460,7 @@
         font-variant-numeric: tabular-nums;
       }
       .stat {
+        position: relative; /* anchors the Stage 4 damage-pop, below */
         display: flex;
         flex-direction: column;
         gap: var(--space-1);
@@ -422,6 +468,30 @@
         border: 1px solid var(--color-border);
         border-radius: var(--radius-md);
         padding: var(--space-3) var(--space-4);
+      }
+      /* Stage 4 (Combo Animation): a floating "-N" that rises and fades over
+         the defender's HP card — purely decorative (aria-hidden, see
+         app.js's own showDamagePop). Reuses --color-error, the same token
+         the error/disconnect banners already use for a negative outcome. */
+      .damage-pop {
+        position: absolute;
+        top: var(--space-2);
+        right: var(--space-3);
+        font-weight: 700;
+        font-size: 1.1rem;
+        color: var(--color-error);
+        pointer-events: none;
+        animation: damage-pop 1.2s ease-out forwards;
+      }
+      @keyframes damage-pop {
+        0% {
+          opacity: 1;
+          transform: translateY(0);
+        }
+        100% {
+          opacity: 0;
+          transform: translateY(-20px);
+        }
       }
       .stat-value {
         font-size: 1.25rem;
@@ -495,6 +565,38 @@
         display: block;
         width: 60%;
         height: 60%;
+      }
+      /* Stage 4 (Combo Animation): one flash per now-empty cell that just
+         took part in a Combo (app.js's own playComboAnimation) — a brief
+         outline pulse in the triggering effect's own colour, reusing this
+         file's existing tokens (no new hues). .combo-flash is the neutral
+         default for a pure Owner Combo with no type match. */
+      @keyframes combo-flash {
+        0% {
+          box-shadow: 0 0 0 4px var(--flash-color, var(--color-primary-strong));
+        }
+        100% {
+          box-shadow: 0 0 0 0 transparent;
+        }
+      }
+      #board button.combo-flash,
+      #board button.combo-flash--lightning,
+      #board button.combo-flash--water,
+      #board button.combo-flash--nature,
+      #board button.combo-flash--fire {
+        animation: combo-flash 0.6s ease-out;
+      }
+      #board button.combo-flash--fire {
+        --flash-color: var(--color-accent-strong);
+      }
+      #board button.combo-flash--lightning {
+        --flash-color: var(--color-accent-strong);
+      }
+      #board button.combo-flash--water {
+        --flash-color: var(--color-primary-strong);
+      }
+      #board button.combo-flash--nature {
+        --flash-color: var(--color-primary-strong);
       }
       #opponent-hand {
         display: flex;
@@ -720,6 +822,56 @@
             Join queue<span aria-hidden="true">→</span>
           </button>
         </div>
+
+        <!-- Stage 4 (Onboarding): every number here is copied straight from
+             src/game/engine.ts's own constants, not restated from memory —
+             STARTING_HP, STARTING_HAND_SIZE, MAX_HAND_SIZE, OWNER_COMBO_DAMAGE,
+             TYPE_ONLY_COMBO_DAMAGE, FIRE_EFFECT_DAMAGE, WATER_DRAW_COUNT,
+             NATURE_AP_BONUS — and the 45s figure from server.ts's own
+             turnDurationMs default. Keep these in sync if those ever change. -->
+        <details class="onboarding">
+          <summary>How to play</summary>
+          <div class="onboarding-body">
+            <p>
+              You and your opponent start with 100 HP and a hand of 3 cards —
+              Fire, Lightning, Water or Nature. Each turn you have 2 AP (your
+              very first turn is 1 AP if you go first); Playing a card or
+              Drawing a new one each costs 1 AP. Your hand can hold at most 5
+              cards at once.
+            </p>
+            <p>
+              The board starts as a 3x3 grid and grows to 5x5 the moment the
+              3x3 fills up. You have 45 seconds to act on your turn — if time
+              runs out, your turn ends automatically and play passes to your
+              opponent.
+            </p>
+            <p>Reduce your opponent to 0 HP first to win the game.</p>
+          </div>
+        </details>
+
+        <details class="onboarding">
+          <summary>Combo guide</summary>
+          <div class="onboarding-body">
+            <p>
+              Placing 3 cards in a row, column or diagonal forms a Combo if
+              they share an <strong>owner</strong>, a <strong>type</strong>,
+              or both:
+            </p>
+            <ul>
+              <li><strong>Owner Combo</strong> (same player placed all 3, any mix of types) — 15 damage.</li>
+              <li><strong>Type Combo</strong> (same card type, placed by either player) — 5 damage, credited to whoever completed it.</li>
+              <li>Both at once still counts once, for 15 — never 15+5.</li>
+            </ul>
+            <p>A Type Combo — same card type — also triggers that type's own effect:</p>
+            <ul>
+              <li><strong>Fire</strong> — 10 extra damage on top of the Combo's own damage.</li>
+              <li><strong>Lightning</strong> — reduces the opponent's AP on their very next turn.</li>
+              <li><strong>Water</strong> — draws 2 cards (fewer if your hand is close to its 5-card limit).</li>
+              <li><strong>Nature</strong> — grants 1 extra AP, usable immediately this same turn.</li>
+            </ul>
+            <p>A full board with neither player dead locks the game as a draw — it counts toward neither player's score.</p>
+          </div>
+        </details>
       </section>
 
       <section id="game-panel" class="game is-hidden">

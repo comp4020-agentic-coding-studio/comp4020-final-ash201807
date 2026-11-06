@@ -657,6 +657,17 @@ describe("Combat Events", () => {
     expect(combatEvent).not.toBeNull();
     expect(combatEvent!.combos[0].damage).toBe(15);
   });
+
+  it("records the board size the combo's cells were computed against on an ordinary 3x3 Play", () => {
+    const state = makeState({ ap: 2, currentPlayer: "A" });
+    place(state, "A", "lightning", 0, 0);
+    place(state, "A", "lightning", 0, 1);
+    state.players.A.hand = ["lightning"];
+
+    const { combatEvent } = playCard(state, "A", 0, 0, 2);
+
+    expect(combatEvent!.boardSize).toBe(3);
+  });
 });
 
 describe("Hand Limit (Stage 3)", () => {
@@ -907,7 +918,7 @@ describe("Expansion (section 12)", () => {
     place(state, "A", "lightning", 4, 4);
     state.players.A.hand = ["fire"];
 
-    playCard(state, "A", 0, 0, 1); // (0,1): Expansion, completes the diagonal Combo
+    const { combatEvent } = playCard(state, "A", 0, 0, 1); // (0,1): Expansion, completes the diagonal Combo
 
     expect(state.board.length).toBe(3); // Main Board no longer full -> shrunk
     // The cleared Main cells (old (1,2), (2,3)) map to new (0,1) and (1,2).
@@ -917,6 +928,14 @@ describe("Expansion (section 12)", () => {
     expect(state.board[0][0]).toEqual({ owner: "A", type: "fire" }); // old (1,1)
     // Only a 3x3 grid exists now — the old (4,4) card has no cell to live in.
     expect(state.board.every((row) => row.length === 3)).toBe(true);
+    // The Combat Event's own boardSize reflects the 5x5 grid the combo's
+    // cells were computed against (captured BEFORE this same Play's own
+    // Phase 7 shrink), not the 3x3 the board ends up at — its cell
+    // coordinates ((0,1) Expansion row, (1,2)/(2,3) in old 5x5 terms) would
+    // otherwise be silently misinterpreted against the wrong-sized grid by
+    // any consumer (see client/app.js's own playComboAnimation, which
+    // checks exactly this field before animating).
+    expect(combatEvent!.boardSize).toBe(5);
   });
 });
 

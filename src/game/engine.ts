@@ -236,6 +236,7 @@ function unionCells(combos: Combo[]): Array<[number, number]> {
 // from data already computed above, not recomputed independently, so it can
 // never drift from what `state` actually received.
 function applyCombos(state: GameState, actingPlayer: PlayerId, random: RandomSource): CombatEvent | null {
+  const boardSize = state.board.length; // captured before Phase 6/7 can resize it
   const combos = detectCombos(state.board); // Phase 1
 
   if (combos.length === 0) {
@@ -273,7 +274,7 @@ function applyCombos(state: GameState, actingPlayer: PlayerId, random: RandomSou
   if (state.players[opponent].hp <= 0) {
     state.status = "finished";
     state.winner = actingPlayer;
-    return { actingPlayer, combos: comboEvents, fireBonusDamage, effectsApplied };
+    return { actingPlayer, boardSize, combos: comboEvents, fireBonusDamage, effectsApplied };
   }
 
   // Phase 5: effects, one application per combo that also carries a
@@ -322,7 +323,7 @@ function applyCombos(state: GameState, actingPlayer: PlayerId, random: RandomSou
       if (state.players[opponent].hp <= 0) {
         state.status = "finished";
         state.winner = actingPlayer;
-        return { actingPlayer, combos: comboEvents, fireBonusDamage, effectsApplied };
+        return { actingPlayer, boardSize, combos: comboEvents, fireBonusDamage, effectsApplied };
       }
     }
   }
@@ -342,7 +343,7 @@ function applyCombos(state: GameState, actingPlayer: PlayerId, random: RandomSou
     state.status = "locked";
   }
 
-  return { actingPlayer, combos: comboEvents, fireBonusDamage, effectsApplied };
+  return { actingPlayer, boardSize, combos: comboEvents, fireBonusDamage, effectsApplied };
 }
 
 export function createInitialState(random: RandomSource = Math.random): GameState {

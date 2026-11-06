@@ -92,6 +92,19 @@ export interface Combo {
 // ever exposes either player's hidden hand.
 export interface CombatEvent {
   actingPlayer: PlayerId;
+  // The board's own size (3 or 5) at the moment these combos were detected
+  // — i.e. BEFORE Phase 6's clear and Phase 7's possible expand/shrink in
+  // this same Play (engine.ts's applyCombos: detectCombos runs first, the
+  // board can resize afterward). A client wanting to highlight these exact
+  // cells must check this against whatever board size it's about to render
+  // next, not assume it matches — the one case this matters is a Play that
+  // both completes a Combo AND causes the Main Board to shrink from 5x5
+  // back to 3x3 in that same Play (confirmed reachable, see
+  // engine.test.ts's "shrinks back to 3x3 when a combo clears a Main Board
+  // cell"), where the combos[].cells coordinates are still in 5x5 terms
+  // even though GameState.board sent alongside/after this event is already
+  // back to 3x3.
+  boardSize: number;
   combos: Array<{
     cells: Array<[number, number]>;
     ownerMatch: boolean;
