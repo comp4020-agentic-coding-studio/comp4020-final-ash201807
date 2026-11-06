@@ -35,6 +35,17 @@ export interface GameState {
   currentPlayer: PlayerId;
   firstPlayer: PlayerId;
   ap: number;
+  // Stage 2 (Turn Timer): incremented every time engine.ts's beginTurn()
+  // runs — the first turn of a fresh game is turnNumber 1. Exists purely so
+  // a caller (server.ts) can detect "did a new turn actually begin" by
+  // comparing this value before/after an action, which `currentPlayer`
+  // alone cannot: two stacked Lightning hits can skip an entire turn and
+  // leave currentPlayer right back where it started (see engine.test.ts's
+  // "stacks two Lightning combos into a 0-AP opponent turn that is skipped
+  // entirely"), which is still two real turn transitions, not zero. Never
+  // read by anything inside engine.ts itself beyond beginTurn's own
+  // increment — a server-facing signal, not a rule.
+  turnNumber: number;
   // Lightning hits stacked against each player, to be applied to (and
   // consumed by) that player's own next turn only.
   pendingLightning: Record<PlayerId, number>;

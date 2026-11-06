@@ -43,6 +43,15 @@ export interface ServerOptions {
   // dropped outright, no grace period at all (Stage 9's own rule: it never
   // held a seat with state at stake).
   disconnectGraceMs?: number;
+  // Stage 2 (Turn Timer): how long a player has to act before their turn
+  // auto-ends. Per the project owner's confirmed decision: enforced "Live"
+  // (a real setTimeout runs while the process is awake, not just checked
+  // opportunistically on the next request) AND continues to run while the
+  // current player is disconnected (the confirmed "Continue" decision — see
+  // enforceTurnDeadline's own comment for why disconnect never pauses or
+  // resets it). Injectable so spec/ can run this in milliseconds, same
+  // pattern as disconnectGraceMs; defaults to the real 45s otherwise.
+  turnDurationMs?: number;
 }
 
 // spec/invariants.test.ts only checks that each README heading appears, in
@@ -72,6 +81,7 @@ function renderReadme(): string {
 
 export function createServer(persistence: Persistence, options: ServerOptions = {}): Server {
   const disconnectGraceMs = options.disconnectGraceMs ?? 30_000;
+  const turnDurationMs = options.turnDurationMs ?? 45_000;
   const appState = persistence.load();
   // Pre-Stage-8a rows store a bare PlayerId per session, and pre-Stage-2
   // rows have no seriesId; upgrade both once, here, before anything else
@@ -83,6 +93,16 @@ export function createServer(persistence: Persistence, options: ServerOptions = 
   appState.sessions = normalizeSessions(appState.sessions);
   appState.queue = normalizeQueue(appState.queue);
   appState.seriesList = normalizeSeriesList(appState.seriesList);
+
+  // Stage 2 (Turn Timer): live setTimeout handles, keyed by seriesId — the
+  // "Live" confirmed decision means a real in-process timer enforces the
+  // deadline the moment it elapses while this process is awake, not just a
+  // value checked opportunistically on the next request (that's still the
+  // fallback for when the process WASN'T awake — see recoverTurnTimers).
+  // Never read directly by game logic; only armTurnTimer/stopTurnTimer below
+  // ever touch this map, so there's exactly one place a stale or duplicate
+  // timer could leak from.
+  const turnTimers = new Map<string, NodeJS.Timeout>();
 
   // Seated sockets only — keyed to the session id, not a cached
   // PlayerId/seriesId: resolving both fresh from appState.sessions on every
@@ -113,7 +133,12 @@ export function createServer(persistence: Persistence, options: ServerOptions = 
   }
 
   function seriesScore(series: SeriesState): SeriesScore {
-    return { gamesWon: series.gamesWon, seriesStatus: series.seriesStatus, seriesWinner: series.seriesWinner };
+    return {
+      gamesWon: series.gamesWon,
+      seriesStatus: series.seriesStatus,
+      seriesWinner: series.seriesWinner,
+      turnDeadline: series.turnDeadline,
+    };
   }
 
   // Stage 4b: takes an explicit seriesId and filters `sockets` down to just
@@ -148,6 +173,103 @@ export function createServer(persistence: Persistence, options: ServerOptions = 
     }
   }
 
+  // Stage 2 (Turn Timer). Three invariants every call site below relies on:
+  // (1) stopTurnTimer always runs before a new timer is scheduled for the
+  // same seriesId, so turnTimers never holds two live handles for one
+  // series; (2) armTurnTimer is the only place that sets a FRESH deadline
+  // (now + turnDurationMs) — nothing else computes that arithmetic, so
+  // there's one formula to get right; (3) a series with no active turn to
+  // time (game concluded, waiting for confirmNewGame; or the whole series
+  // concluded) always has both turnDeadline: null AND no entry in
+  // turnTimers — the two are kept in sync at every transition below, never
+  // independently.
+  function stopTurnTimer(seriesId: string): void {
+    const handle = turnTimers.get(seriesId);
+    if (handle) {
+      clearTimeout(handle);
+      turnTimers.delete(seriesId);
+    }
+  }
+
+  function scheduleTimer(seriesId: string, delayMs: number): void {
+    stopTurnTimer(seriesId);
+    const handle = setTimeout(() => handleTurnTimeout(seriesId), delayMs);
+    turnTimers.set(seriesId, handle);
+  }
+
+  // Starts (or restarts) the CURRENT turn's deadline at a fresh
+  // turnDurationMs from right now — called whenever a new turn has just
+  // begun (a brand new series' first turn, an ordinary endTurn, AP
+  // exhaustion auto-advancing via engine.ts's settleZeroApTurns, or a fresh
+  // game starting via confirmNewGame), never on an action that merely
+  // continues the SAME turn (a Play/Draw that didn't end it) — the
+  // confirmed rule is 45 seconds per TURN, not per action, so those call
+  // sites deliberately leave an in-flight deadline untouched instead of
+  // calling this.
+  function armTurnTimer(seriesId: string): void {
+    const series = appState.seriesList[seriesId];
+    if (!series) return;
+    series.turnDeadline = Date.now() + turnDurationMs;
+    scheduleTimer(seriesId, turnDurationMs);
+  }
+
+  // Fires when a turn's live setTimeout actually elapses while this process
+  // is awake (the confirmed "Live" decision) — auto-ends the timed-out
+  // player's turn via the SAME engine.endTurn() an explicit endTurn message
+  // already uses, so "the server ran out the clock" and "the player clicked
+  // End Turn" go through one code path, not two. Per the confirmed
+  // "Continue" decision, this never checks or cares whether the timed-out
+  // player is currently connected — a disconnected player's turn still
+  // times out on schedule, exactly like a connected one's. engine.ts's
+  // endTurn can never itself conclude a game (only playCard's lethal/locked
+  // paths, or a mutual requestQuit/rejectQuit, do that) — unlike the main
+  // message handler below, there is no settleGameOutcome/concludeSeries
+  // fold-in needed here, the game is guaranteed to still be "active"
+  // afterward.
+  function handleTurnTimeout(seriesId: string): void {
+    turnTimers.delete(seriesId); // this timer already fired; nothing left to clear
+    const series = appState.seriesList[seriesId];
+    if (!series) return; // series concluded before this fired
+    const game = series.games[series.games.length - 1];
+    if (!game || game.status !== "active") return; // no active turn left to time out
+
+    const timedOutPlayer = game.currentPlayer;
+    endTurn(game, timedOutPlayer);
+    logEvent({ event: "turn_timed_out", seriesId, player: timedOutPlayer });
+
+    armTurnTimer(seriesId); // the next player's turn just began; time it too
+
+    persistence.save(appState);
+    broadcastState(seriesId);
+  }
+
+  // Runs once, when this process starts — never per-request — to recover
+  // from however long the process was actually asleep (Fly's own
+  // auto-stop/resume, or any other restart) between persisting a deadline
+  // and this moment. A deadline already in the past is resolved by applying
+  // EXACTLY ONE timeout transition, the same wall-clock-comparison
+  // reasoning reapExpiredSessions already established for the disconnect
+  // grace period — never "how many turns would have elapsed," since that
+  // would let one long sleep silently fast-forward a game by several turns
+  // with nobody watching. A deadline still in the future gets a live timer
+  // scheduled for its own remaining time, not a fresh full turnDurationMs.
+  function recoverTurnTimers(): void {
+    for (const [seriesId, series] of Object.entries(appState.seriesList)) {
+      const game = series.games[series.games.length - 1];
+      if (!game || game.status !== "active") continue;
+      if (series.turnDeadline === null) {
+        armTurnTimer(seriesId);
+        continue;
+      }
+      const remaining = series.turnDeadline - Date.now();
+      if (remaining <= 0) {
+        handleTurnTimeout(seriesId);
+      } else {
+        scheduleTimer(seriesId, remaining);
+      }
+    }
+  }
+
   // Stage 6: the one "a series has ended, tell whoever's owed a message,
   // release every member's SessionEntry, remove the series itself" sequence,
   // shared by all three ways a series can end (disconnect-forfeit below,
@@ -165,6 +287,10 @@ export function createServer(persistence: Persistence, options: ServerOptions = 
   // SessionEntry can't affect finding another's, since each is looked up by
   // its own id, not by re-deriving the list mid-loop.
   function concludeSeries(seriesId: string, notifications: Array<{ sessionId: string; message: ServerMessage }>): void {
+    // Stage 2 (Turn Timer): a concluded series has no turn left to time —
+    // stopped here, in the one function every ended-series path already
+    // funnels through, rather than at each of its call sites individually.
+    stopTurnTimer(seriesId);
     for (const { sessionId: memberSessionId, message } of notifications) {
       for (const [memberWs, sid] of sockets) {
         if (sid === memberSessionId) {
@@ -275,6 +401,7 @@ export function createServer(persistence: Persistence, options: ServerOptions = 
         gamesWon: { A: 0, B: 0 },
         seriesWinner: null,
         seriesStatus: "active",
+        turnDeadline: null, // armTurnTimer (below) sets the real value
       };
 
       for (const [sessionId, seat] of [[first, "A"], [second, "B"]] as const) {
@@ -292,6 +419,12 @@ export function createServer(persistence: Persistence, options: ServerOptions = 
         displayIdA: displayIdFor(first),
         displayIdB: displayIdFor(second),
       });
+
+      // Stage 2 (Turn Timer): the very first turn of a brand new series
+      // starts its own deadline the same way every later turn does — no
+      // special-casing "the first turn" beyond calling this where the game
+      // itself just became active.
+      armTurnTimer(seriesId);
 
       persistence.save(appState);
       broadcastState(seriesId);
@@ -462,7 +595,32 @@ export function createServer(persistence: Persistence, options: ServerOptions = 
           return;
         }
 
+        // Stage 2 (Turn Timer): reject a turn action that arrives after its
+        // own deadline already passed — a defensive check against the one
+        // window the "Live" setTimeout alone can't close (a message event
+        // and this series' own timeout callback both already queued for the
+        // same event-loop tick; Node processes whichever was queued first,
+        // so a message that slips in just ahead of its own timer callback
+        // would otherwise still be honoured). Per the project owner's
+        // confirmed decision, the deadline the SERVER already holds at the
+        // moment it validates this action is authoritative — never a
+        // client-reported time. Turn-order/AP/legality are still engine.ts's
+        // own job below; this only catches "too late," which engine.ts has
+        // no concept of. requestQuit/rejectQuit/confirmNewGame/forfeitSeries
+        // are deliberately exempt — none of them are turn-bound actions (see
+        // their own existing "no turn-order check" comments).
+        if (
+          (message.type === "play" || message.type === "draw" || message.type === "endTurn") &&
+          series.turnDeadline !== null &&
+          Date.now() >= series.turnDeadline
+        ) {
+          logEvent({ event: "action_rejected", displayId, seriesId, action: message.type, reason: "turn already timed out" });
+          send(ws, { type: "error", message: "your turn already timed out" });
+          return;
+        }
+
         const statusBefore = game.status;
+        const turnNumberBefore = game.turnNumber;
         // Set only by the "play" branch below, and only when that Play
         // formed at least one Combo — every other action leaves this null,
         // so no combatEvent is ever broadcast for a non-Play action.
@@ -523,6 +681,39 @@ export function createServer(persistence: Persistence, options: ServerOptions = 
         // the event describes what this Play's Combos did, independent of
         // whatever happens to the series as a result.
         if (combatEvent) broadcastCombatEvent(seriesId, combatEvent);
+
+        // Stage 2 (Turn Timer): keep the timer in sync with whatever this
+        // action actually did — exactly one of these three cases applies to
+        // any single action, never more than one.
+        if (message.type === "confirmNewGame") {
+          // currentGame(seriesId) !== game only when BOTH players just
+          // confirmed (confirmNewGame's own "both must agree" shape) — a
+          // genuinely new game, whose own first turn needs its own fresh
+          // deadline. One confirmation alone is a no-op for the timer:
+          // there's still no active turn to time until the second
+          // confirmation arrives.
+          if (currentGame(seriesId) !== game) armTurnTimer(seriesId);
+        } else {
+          const gameAfter = currentGame(seriesId)!;
+          if (gameAfter.status !== "active") {
+            // The game just ended (a lethal/locked Play, or a mutual
+            // requestQuit abandon) — no active turn left to time until
+            // confirmNewGame starts the next one.
+            stopTurnTimer(seriesId);
+            series.turnDeadline = null;
+          } else if (gameAfter.turnNumber !== turnNumberBefore) {
+            // A new turn actually began: an ordinary endTurn, AP exhaustion
+            // auto-advancing via engine.ts's settleZeroApTurns, or two
+            // stacked Lightning hits skipping a whole turn and landing back
+            // on the same currentPlayer (turnNumber catches this; a plain
+            // currentPlayer comparison would miss it — see types.ts's own
+            // comment on turnNumber).
+            armTurnTimer(seriesId);
+          }
+          // else: the same turn continues (a Play/Draw that didn't end it,
+          // or a requestQuit/rejectQuit that left the game active) —
+          // deadline deliberately left untouched.
+        }
 
         // The game this action acted on just concluded (it wasn't already
         // concluded before this action — confirmNewGame's own "cannot start
@@ -596,6 +787,15 @@ export function createServer(persistence: Persistence, options: ServerOptions = 
       });
     });
   });
+
+  // Stage 2 (Turn Timer): runs once, at server startup, after every
+  // function it calls is already defined above — recovers whatever
+  // in-process timers this fresh process needs for any series that was
+  // already active in persisted state before this process started (a Fly
+  // auto-stop/resume, or any other restart). See recoverTurnTimers' own
+  // comment for exactly-once-timeout semantics on an already-elapsed
+  // deadline.
+  recoverTurnTimers();
 
   return httpServer;
 }

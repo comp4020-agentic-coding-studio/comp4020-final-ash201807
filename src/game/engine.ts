@@ -134,6 +134,7 @@ function beginTurn(state: GameState): void {
   state.pendingLightning[state.currentPlayer] = 0;
   player.firstTurnTaken = true;
   state.ap = ap;
+  state.turnNumber += 1;
 }
 
 function advanceTurn(state: GameState): void {
@@ -333,6 +334,7 @@ export function createInitialState(random: RandomSource = Math.random): GameStat
     currentPlayer: firstPlayer,
     firstPlayer,
     ap: 0,
+    turnNumber: 0,
     pendingLightning: { A: 0, B: 0 },
     winner: null,
     restartConfirmed: { A: false, B: false },

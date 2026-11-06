@@ -37,7 +37,17 @@ jobs:
           docker build -t app .
           # 1s instead of the real 30s default (src/server/index.ts) so
           # spec/game.test.ts's disconnect-expiry checks don't burn CI time
-          # actually waiting out the production grace period.
+          # actually waiting out the production grace period. TURN_DURATION_MS
+          # deliberately stays at its real 45s default here, unlike
+          # DISCONNECT_GRACE_MS above: the shared a/b pairing several earlier
+          # tests reuse (e.g. the reconnect check, which compares
+          # currentPlayer before/after a short wait) runs in low hundreds of
+          # milliseconds total, nowhere near even a shortened few-second
+          # timer, so shortening it would only risk an unrelated turn
+          # auto-ending mid-test and flipping currentPlayer out from under an
+          # assertion that isn't testing the timer at all. The dedicated
+          # turn-timeout tests below pay the real 45s wait each, which still
+          # fits comfortably inside this job's 20-minute timeout.
           docker run -d --init --name app -p 8080:8080 -e PORT=8080 -e DISCONNECT_GRACE_MS=1000 --tmpfs /data app
       - name: Run the spec
         run: pnpm check

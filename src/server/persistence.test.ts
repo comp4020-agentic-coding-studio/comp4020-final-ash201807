@@ -10,6 +10,7 @@ describe("normalizeSeriesList", () => {
         gamesWon: { A: 1, B: 0 },
         seriesWinner: null,
         seriesStatus: "active" as const,
+        turnDeadline: 123456,
       },
     };
     expect(normalizeSeriesList(seriesList)).toEqual(seriesList);
@@ -40,7 +41,14 @@ describe("normalizeSeriesList", () => {
     // that — astronomically unlikely given newSeriesId()'s random scheme,
     // and not a case this function needs to disambiguate further.
     const seriesList = {
-      abc123: { seriesId: "abc123", games: [], gamesWon: { A: 0, B: 0 }, seriesWinner: null, seriesStatus: "active" as const },
+      abc123: {
+        seriesId: "abc123",
+        games: [],
+        gamesWon: { A: 0, B: 0 },
+        seriesWinner: null,
+        seriesStatus: "active" as const,
+        turnDeadline: null,
+      },
     };
     expect(normalizeSeriesList(seriesList)).toEqual(seriesList);
   });
@@ -54,13 +62,30 @@ describe("normalizeSeriesList", () => {
         gamesWon: { A: 0, B: 0 },
         seriesWinner: null,
         seriesStatus: "active",
+        turnDeadline: null,
       },
+    });
+  });
+
+  it("upgrades a pre-Stage-2(Turn Timer) entry (no turnDeadline) to null rather than inventing a deadline", () => {
+    const preTimer = {
+      "series-1": { seriesId: "series-1", games: [], gamesWon: { A: 0, B: 0 }, seriesWinner: null, seriesStatus: "active" as const },
+    };
+    expect(normalizeSeriesList(preTimer)).toEqual({
+      "series-1": { ...preTimer["series-1"], turnDeadline: null },
     });
   });
 
   it("skips an entry that isn't recognizable as a SeriesState at all, rather than guessing at it", () => {
     const mixed = {
-      "series-1": { seriesId: "series-1", games: [], gamesWon: { A: 0, B: 0 }, seriesWinner: null, seriesStatus: "active" as const },
+      "series-1": {
+        seriesId: "series-1",
+        games: [],
+        gamesWon: { A: 0, B: 0 },
+        seriesWinner: null,
+        seriesStatus: "active" as const,
+        turnDeadline: null,
+      },
       garbage: "not a series",
     };
     expect(normalizeSeriesList(mixed)).toEqual({

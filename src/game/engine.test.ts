@@ -36,6 +36,7 @@ function makeState(overrides: Partial<GameState> = {}): GameState {
     currentPlayer: "A",
     firstPlayer: "A",
     ap: 2,
+    turnNumber: 1,
     pendingLightning: { A: 0, B: 0 },
     winner: null,
     restartConfirmed: { A: false, B: false },

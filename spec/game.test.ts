@@ -51,6 +51,12 @@ import WebSocket from "ws";
 // server with DISCONNECT_GRACE_MS=1000 (and export it before `pnpm check`
 // too) for a fast local run.
 const disconnectGraceMs = Number(process.env.DISCONNECT_GRACE_MS ?? 30_000);
+// Stage 2 (Turn Timer): same override pattern as disconnectGraceMs above,
+// for the same reason — the turn-timeout tests actually wait out the
+// server's own configured TURN_DURATION_MS (src/server/index.ts) rather
+// than mocking time. Set this to a few seconds locally (and export it
+// before `pnpm check`) for a fast run; CI sets it in checks.yml.
+const turnDurationMs = Number(process.env.TURN_DURATION_MS ?? 45_000);
 const baseUrl = inject("baseUrl");
 const wsUrl = baseUrl.replace(/^http/, "ws") + "/ws";
 
@@ -58,6 +64,7 @@ interface SeriesScore {
   gamesWon: Record<"A" | "B", number>;
   seriesStatus: "active" | "finished" | "abandoned";
   seriesWinner: "A" | "B" | null;
+  turnDeadline: number | null;
 }
 
 interface ServerMessage {
@@ -111,6 +118,10 @@ function wait(ms: number): Promise<void> {
 
 function lastState(messages: ServerMessage[]) {
   return messages.filter((m) => m.type === "state").at(-1)?.state;
+}
+
+function lastSeries(messages: ServerMessage[]): SeriesScore | undefined {
+  return messages.filter((m) => m.type === "state").at(-1)?.series;
 }
 
 // Stage 1 (authorization/logging hardening): the server now sends an
@@ -176,6 +187,16 @@ it("pairs the first two queued sessions as A and B, and starts the game for both
   // pushed it a state too, not just the newly-queueing B.
   expect(lastState(a.messages)).toBeDefined();
   expect(lastState(b.messages)).toBeDefined();
+  // Stage 2 (Turn Timer): the very first turn's deadline is set the moment
+  // the pairing forms, roughly turnDurationMs from now (a generous ±5s
+  // window tolerates test/network slack, never the full duration off), and
+  // both players see the exact same deadline — there's one timer per
+  // series, not one per player.
+  const deadline = lastSeries(a.messages)?.turnDeadline;
+  expect(deadline).not.toBeNull();
+  expect(deadline!).toBeGreaterThan(Date.now() + turnDurationMs - 5000);
+  expect(deadline!).toBeLessThanOrEqual(Date.now() + turnDurationMs);
+  expect(lastSeries(b.messages)?.turnDeadline).toBe(deadline);
 });
 
 it("enforces turn order and leaves state unchanged on a rejected action", async () => {
@@ -494,6 +515,146 @@ it("abandons a series with no winner, notifying nobody, once BOTH players' grace
   fresh.b.ws.close();
   await wait(200);
 }, disconnectGraceMs + 5000);
+
+// --- Stage 2 (Turn Timer): server-authoritative 45s turn deadline --------
+//
+// These tests actually wait out the server's configured TURN_DURATION_MS
+// (src/server/index.ts), same pattern as the disconnect-expiry tests above —
+// set it to a few seconds locally (and export it before `pnpm check`) for a
+// fast run; CI sets it in checks.yml.
+
+it("auto-ends the current player's turn once the deadline elapses, broadcasting a fresh turn and deadline to both players", async () => {
+  const match = await formAPairing();
+  const state = lastState(match.a.messages);
+  if (!state) throw new Error("expected a state after pairing");
+  const timedOutPlayer = state.currentPlayer;
+  const other = timedOutPlayer === "A" ? match.b : match.a;
+  const self = timedOutPlayer === "A" ? match.a : match.b;
+
+  await wait(turnDurationMs + 500);
+
+  // The timeout fires via a live in-process setTimeout (the confirmed
+  // "Live" decision) — no trigger connection needed, unlike the
+  // disconnect-expiry tests above, which only reap lazily on the next
+  // WebSocket upgrade.
+  const afterTimeout = lastState(self.messages);
+  expect(afterTimeout?.currentPlayer).not.toBe(timedOutPlayer);
+  expect(afterTimeout?.status).toBe("active");
+  // Both players get the SAME new state/deadline — this is a server-level
+  // broadcast, not a message to just the timed-out player.
+  expect(lastState(other.messages)?.currentPlayer).toBe(afterTimeout?.currentPlayer);
+  const newDeadline = lastSeries(self.messages)?.turnDeadline;
+  expect(newDeadline).not.toBeNull();
+  expect(newDeadline!).toBeGreaterThan(Date.now());
+  expect(lastSeries(other.messages)?.turnDeadline).toBe(newDeadline);
+
+  match.a.ws.close();
+  match.b.ws.close();
+  await wait(200);
+}, turnDurationMs + 5000);
+
+it("rejects an action from the just-timed-out player, leaving the auto-advanced turn unchanged", async () => {
+  // By the time a real message can arrive over the wire after waiting out
+  // the full turnDurationMs, the server's own handleTurnTimeout has ALREADY
+  // fired and armed a brand new future deadline for the new current player
+  // — so this lands on engine.ts's ordinary turn-order guard ("not this
+  // player's turn"), the same path any out-of-turn action already takes,
+  // not the narrow same-tick "your turn already timed out" pre-check in
+  // server.ts (that race — a message and this series' own timeout callback
+  // both already queued for the same event-loop tick — isn't practically
+  // reachable via a real wall-clock wait in a black-box test; it's covered
+  // by this file's reasoning alongside the already-established
+  // not-practical-to-script states noted elsewhere in this file).
+  const match = await formAPairing();
+  const state = lastState(match.a.messages);
+  if (!state) throw new Error("expected a state after pairing");
+  const timedOutPlayer = state.currentPlayer === "A" ? match.a : match.b;
+
+  await wait(turnDurationMs + 500);
+
+  const stateAfterTimeout = lastState(timedOutPlayer.messages);
+  const countBefore = timedOutPlayer.messages.length;
+
+  // The timed-out player's own socket is still open — sending an action
+  // for a turn that's no longer theirs must be rejected, not silently
+  // accepted as if it were the (different) new current player's action.
+  send(timedOutPlayer.ws, { type: "draw" });
+  await wait(200);
+
+  const newMessages = timedOutPlayer.messages.slice(countBefore);
+  expect(newMessages).toHaveLength(1);
+  expect(newMessages[0].type).toBe("error");
+  expect(newMessages[0].message).toMatch(/turn/);
+  // No new state was pushed as a result of the rejected action — the state
+  // this player last saw is still the one from right after the auto-timeout.
+  expect(lastState(timedOutPlayer.messages)).toEqual(stateAfterTimeout);
+
+  match.a.ws.close();
+  match.b.ws.close();
+  await wait(200);
+}, turnDurationMs + 5000);
+
+it("keeps the timer running and still times out a turn even while the current player is disconnected (confirmed: disconnect never pauses the clock)", async () => {
+  const match = await formAPairing();
+  const state = lastState(match.a.messages);
+  if (!state) throw new Error("expected a state after pairing");
+  const timedOutPlayer = state.currentPlayer === "A" ? match.a : match.b;
+  const other = timedOutPlayer === match.a ? match.b : match.a;
+
+  // The timed-out player disconnects WITHOUT acting — well within the
+  // disconnect grace period, so their seat isn't forfeited, but per the
+  // confirmed "Continue" decision this must not pause or reset their own
+  // turn's deadline either.
+  timedOutPlayer.ws.close();
+  await wait(turnDurationMs + 500);
+
+  // Only the still-connected opponent can observe the result directly —
+  // the disconnected player's old socket is closed.
+  const afterTimeout = lastState(other.messages);
+  expect(afterTimeout?.currentPlayer).toBe(state.currentPlayer === "A" ? "B" : "A");
+  expect(afterTimeout?.status).toBe("active");
+
+  match.a.ws.close();
+  match.b.ws.close();
+  await wait(200);
+}, turnDurationMs + 5000);
+
+it("never leaks one series' turn-timeout broadcast into an unrelated concurrent series", async () => {
+  // Both series pair at nearly the same moment, so both of their OWN
+  // independent timers legitimately fire around the same ~turnDurationMs
+  // mark — "unrelated gets no broadcast at all" would be the wrong
+  // expectation (it has its own active turn being timed too). The real
+  // isolation claim this test checks: whichever series "unrelated" plays
+  // out, the player/deadline it settles on is its OWN series' outcome, not
+  // "toTimeOut"'s — two broadcasts that happen to look similar because they
+  // each independently ran the same timeout logic, not evidence of a leak
+  // between them.
+  const toTimeOut = await formAPairing();
+  const unrelated = await formAPairing();
+
+  const toTimeOutState = lastState(toTimeOut.a.messages);
+  const unrelatedState = lastState(unrelated.a.messages);
+  if (!toTimeOutState || !unrelatedState) throw new Error("expected both pairings to have a state");
+
+  await wait(turnDurationMs + 500);
+
+  const toTimeOutAfter = lastState(toTimeOut.a.messages);
+  const unrelatedAfter = lastState(unrelated.a.messages);
+  expect(toTimeOutAfter?.currentPlayer).not.toBe(toTimeOutState.currentPlayer);
+  expect(unrelatedAfter?.currentPlayer).not.toBe(unrelatedState.currentPlayer);
+
+  // Each series' player hands are still exactly 3 cards (nobody drew or
+  // played a card as part of a timeout — only endTurn ever runs) and belong
+  // to their own series, never swapped with the other's.
+  expect(toTimeOutAfter?.players.A.hand.length).toBe(3);
+  expect(unrelatedAfter?.players.A.hand.length).toBe(3);
+
+  toTimeOut.a.ws.close();
+  toTimeOut.b.ws.close();
+  unrelated.a.ws.close();
+  unrelated.b.ws.close();
+  await wait(200);
+}, turnDurationMs + 5000);
 
 // --- Stage 5: best-of-three series lifecycle ----------------------------
 

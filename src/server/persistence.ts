@@ -42,6 +42,19 @@ export interface SeriesState {
   // while its current game is "finished"/"locked", in the gap between one
   // game ending and both players confirming the next.
   seriesStatus: "active" | "finished" | "abandoned";
+  // Stage 2 (Turn Timer): epoch ms when the CURRENT game's CURRENT turn
+  // auto-ends if nobody acts first — server-level bookkeeping, exactly like
+  // SessionEntry.disconnectedAt (sessions.ts), never a field on GameState
+  // itself (per PROCESS.md's Stage 9 guiding principle: the engine stays
+  // unaware of anything beyond one game's own rules). Null whenever there's
+  // no active turn to time (the current game has already ended and both
+  // players are only waiting to confirm the next one) — server.ts's own
+  // scheduling functions keep this in sync with whichever turn is actually
+  // live. Read only as a wall-clock comparison against Date.now() (see
+  // server.ts's own turn-timeout handling), never by trusting a live JS
+  // timer alone, so a restart or a Fly auto-stop/resume mid-turn still
+  // recovers the right answer.
+  turnDeadline: number | null;
 }
 
 export interface AppState {
@@ -95,6 +108,13 @@ export function normalizeSeriesList(value: unknown): Record<string, SeriesState>
       gamesWon: e.gamesWon ?? { A: 0, B: 0 },
       seriesWinner: e.seriesWinner ?? null,
       seriesStatus: e.seriesStatus ?? "active",
+      // Pre-Stage-2(Turn Timer) rows have no turnDeadline at all — null is
+      // the same safe default server.ts already treats "no deadline set
+      // yet" as, and server.ts's own ensureTurnDeadline (called on every
+      // request that touches a series) assigns a fresh one the next time
+      // this series' current game is found active with none set, rather
+      // than this function inventing a deadline value it has no basis for.
+      turnDeadline: e.turnDeadline ?? null,
     };
   }
   return next;

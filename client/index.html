@@ -323,6 +323,18 @@
         border-color: var(--color-primary-strong);
         color: #fff;
       }
+      /* Stage 2 (Turn Timer): display-only countdown to the server's own
+         turnDeadline — this client never decides a timeout itself, it only
+         counts down to a value the server already computed and sent. */
+      #turn-timer {
+        font-weight: 600;
+        font-variant-numeric: tabular-nums;
+        color: var(--color-text-secondary);
+        margin: 0;
+      }
+      #turn-timer.is-low {
+        color: var(--color-error);
+      }
       .zone-title {
         display: flex;
         align-items: baseline;
@@ -717,6 +729,7 @@
             <p id="series-score"></p>
           </div>
           <p id="turn-indicator"></p>
+          <p id="turn-timer" class="is-hidden" aria-live="off"></p>
         </div>
         <div id="hp-ap-row">
           <div class="stat">

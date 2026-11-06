@@ -17,6 +17,7 @@ function freshSeries(games: GameState[]): SeriesState {
     gamesWon: { A: 0, B: 0 },
     seriesWinner: null,
     seriesStatus: "active",
+    turnDeadline: null,
   };
 }
 

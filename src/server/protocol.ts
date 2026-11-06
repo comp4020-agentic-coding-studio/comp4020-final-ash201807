@@ -10,6 +10,14 @@ export interface SeriesScore {
   gamesWon: Record<PlayerId, number>;
   seriesStatus: "active" | "finished" | "abandoned";
   seriesWinner: PlayerId | null;
+  // Stage 2 (Turn Timer): epoch ms when the CURRENT turn auto-ends if
+  // nobody acts first, or null when there's no active turn to time (the
+  // current game has already ended and both players are only waiting to
+  // confirm the next one). Display-only on the client — see
+  // persistence.ts's SeriesState.turnDeadline for the server-authoritative
+  // copy this is read from; the client never decides a timeout itself, it
+  // only counts down to this value.
+  turnDeadline: number | null;
 }
 
 export type ServerMessage =

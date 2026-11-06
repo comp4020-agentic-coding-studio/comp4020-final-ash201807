@@ -21,6 +21,7 @@ const myHpEl = document.getElementById("my-hp");
 const oppHpEl = document.getElementById("opp-hp");
 const apDisplayEl = document.getElementById("ap-display");
 const turnIndicatorEl = document.getElementById("turn-indicator");
+const turnTimerEl = document.getElementById("turn-timer");
 const boardEl = document.getElementById("board");
 const oppHandCountEl = document.getElementById("opp-hand-count");
 const opponentHandEl = document.getElementById("opponent-hand");
@@ -186,6 +187,8 @@ ws.addEventListener("message", (event) => {
     lastSeries = null;
     clearTimeout(combatEventTimeout);
     setVisible(combatEventBanner, false);
+    clearInterval(turnTimerInterval);
+    setVisible(turnTimerEl, false);
     setVisible(gamePanel, false);
     setVisible(lobbyPanel, true);
     setVisible(joinQueueBtn, true);
@@ -241,12 +244,43 @@ function render() {
   apDisplayEl.textContent = String(state.ap);
 
   renderTurnIndicator(state);
+  renderTurnTimer(state, series);
   renderBoard(state);
   renderOpponentHand(opponent);
   renderHand(state, me);
   renderActionButtons(state);
   renderQuitPanel(state, opponentId);
   renderNewGamePanel(state, opponentId);
+}
+
+// Stage 2 (Turn Timer): display-only countdown to series.turnDeadline, the
+// server's own authoritative value (see protocol.ts's own comment) — this
+// client never decides a timeout itself, it only recomputes "how much of
+// that server-sent deadline is left" once a second so the number keeps
+// counting down between state broadcasts, not just at the moment one
+// arrives. A stale interval is always cleared before a new one starts, so a
+// rapid sequence of state messages (e.g. several AP-exhaustion auto-turns)
+// never leaves more than one ticking at once.
+let turnTimerInterval = null;
+function renderTurnTimer(state, series) {
+  clearInterval(turnTimerInterval);
+  if (state.status !== "active" || !series || series.turnDeadline === null) {
+    setVisible(turnTimerEl, false);
+    return;
+  }
+  const tick = () => {
+    const remainingMs = series.turnDeadline - Date.now();
+    const remainingSeconds = Math.max(0, Math.ceil(remainingMs / 1000));
+    setVisible(turnTimerEl, true);
+    turnTimerEl.textContent =
+      state.currentPlayer === myPlayer
+        ? `${remainingSeconds}s left to act`
+        : `Opponent has ${remainingSeconds}s left`;
+    turnTimerEl.classList.toggle("is-low", remainingSeconds <= 10);
+    if (remainingMs <= 0) clearInterval(turnTimerInterval);
+  };
+  tick();
+  turnTimerInterval = setInterval(tick, 1000);
 }
 
 function renderTurnIndicator(state) {
