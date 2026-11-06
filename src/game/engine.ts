@@ -9,6 +9,16 @@ const MAIN_BOARD_SIZE = 3;
 const EXPANSION_BOARD_SIZE = 5;
 const STARTING_HP = 100;
 const STARTING_HAND_SIZE = 3;
+// Stage 3 (Hand Limit): confirmed by the project owner. Applies uniformly to
+// every path that adds a card to a hand — the ordinary Draw action AND
+// Water's own free draw (see the Water branch in applyCombos below) — never
+// just one of the two, since a cap only one path respects isn't a cap at
+// all. drawCard() rejects outright once the hand is already at this size
+// (confirmed "no extra draws past the cap," not a silent no-op); Water's
+// own overflow is Partial (confirmed): draws only as many cards as there is
+// room for, 0 if the hand is already full, never an error — a combo effect
+// that already fired has nothing left to reject.
+const MAX_HAND_SIZE = 5;
 const NORMAL_TURN_AP = 2;
 const FIRST_TURN_AP = 1;
 const PLAY_COST = 1;
@@ -276,8 +286,23 @@ function applyCombos(state: GameState, actingPlayer: PlayerId, random: RandomSou
       state.pendingLightning[opponent] += 1;
       effectsApplied.push("lightning");
     } else if (combo.sameType === "water") {
-      for (let i = 0; i < WATER_DRAW_COUNT; i++) {
-        state.players[actingPlayer].hand.push(randomCard(random));
+      // Stage 3 (Hand Limit, confirmed "Partial"): draws only as many cards
+      // as there's room for under MAX_HAND_SIZE — 2 with room for 2+, fewer
+      // if less room, 0 if the hand's already full. Recomputed fresh on
+      // every combo in this loop (not just once before it), so two
+      // simultaneous Water combos correctly see whatever room the FIRST one's
+      // own draws already used up, same stacking precedent as Lightning/
+      // Nature's own per-combo application above. Still recorded in
+      // effectsApplied even when capped to 0 actual cards — the Combo DID
+      // trigger Water, same as a stacked Lightning hit is still recorded
+      // even once later floored to a 0-AP turn (see beginTurn/
+      // settleZeroApTurns) — only how much of its own effect could land
+      // changed, not whether it fired.
+      const hand = state.players[actingPlayer].hand;
+      const room = Math.max(0, MAX_HAND_SIZE - hand.length);
+      const drawCount = Math.min(WATER_DRAW_COUNT, room);
+      for (let i = 0; i < drawCount; i++) {
+        hand.push(randomCard(random));
       }
       effectsApplied.push("water");
     } else if (combo.sameType === "nature") {
@@ -379,6 +404,15 @@ export function drawCard(state: GameState, playerId: PlayerId, random: RandomSou
   if (state.status !== "active") throw new Error("game is already finished");
   if (state.currentPlayer !== playerId) throw new Error("not this player's turn");
   if (state.ap < DRAW_COST) throw new Error("not enough AP to draw");
+  // Stage 3 (Hand Limit, confirmed): the ordinary Draw action is rejected
+  // outright once the hand is already at MAX_HAND_SIZE — unlike Water's own
+  // "Partial" overflow rule (applyCombos above), an explicit player-chosen
+  // Draw that can add nothing is simply illegal, the same way any other
+  // action with no effect to apply already is elsewhere in this file (e.g.
+  // "cell is occupied").
+  if (state.players[playerId].hand.length >= MAX_HAND_SIZE) {
+    throw new Error("hand is already at the maximum size");
+  }
 
   state.players[playerId].hand.push(randomCard(random));
   state.ap -= DRAW_COST;

@@ -26,6 +26,7 @@ const boardEl = document.getElementById("board");
 const oppHandCountEl = document.getElementById("opp-hand-count");
 const opponentHandEl = document.getElementById("opponent-hand");
 const handEl = document.getElementById("hand");
+const myHandCountEl = document.getElementById("my-hand-count");
 const drawBtn = document.getElementById("draw-btn");
 const endTurnBtn = document.getElementById("endturn-btn");
 const quitPanel = document.getElementById("quit-panel");
@@ -359,6 +360,7 @@ function renderOpponentHand(opponent) {
 
 function renderHand(state, me) {
   const myTurn = state.status === "active" && state.currentPlayer === myPlayer;
+  myHandCountEl.textContent = String(me.hand.length);
   handEl.innerHTML = "";
   me.hand.forEach((card, index) => {
     const button = document.createElement("button");
@@ -383,9 +385,16 @@ function renderHand(state, me) {
   });
 }
 
+// Stage 3 (Hand Limit): mirrors engine.ts's own MAX_HAND_SIZE. Display-only
+// and disables the Draw button purely as a courtesy — the server rejects an
+// over-cap Draw regardless, same as every other illegal-action guard this
+// client already treats as advisory only (see this file's own top comment).
+const MAX_HAND_SIZE = 5;
+
 function renderActionButtons(state) {
   const myTurn = state.status === "active" && state.currentPlayer === myPlayer;
-  drawBtn.disabled = !myTurn;
+  const handFull = state.players[myPlayer].hand.length >= MAX_HAND_SIZE;
+  drawBtn.disabled = !myTurn || handFull;
   endTurnBtn.disabled = !myTurn;
   forfeitBtn.disabled = state.status !== "active";
 }

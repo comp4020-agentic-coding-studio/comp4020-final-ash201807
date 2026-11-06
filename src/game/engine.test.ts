@@ -659,6 +659,132 @@ describe("Combat Events", () => {
   });
 });
 
+describe("Hand Limit (Stage 3)", () => {
+  it("keeps the initial hand at 3 — unaffected by a cap of 5", () => {
+    const state = createInitialState(queueRandom([0.1, 0.2, 0.3, 0.4, 0.5, 0.6]));
+    expect(state.players.A.hand).toHaveLength(3);
+    expect(state.players.B.hand).toHaveLength(3);
+  });
+
+  it("lets an ordinary Draw succeed below the cap", () => {
+    const state = makeState({ ap: 2, currentPlayer: "A" });
+    state.players.A.hand = ["fire", "fire", "fire"]; // 3, room for 2 more
+
+    drawCard(state, "A");
+
+    expect(state.players.A.hand).toHaveLength(4);
+  });
+
+  it("lets an ordinary Draw succeed at exactly one below the cap", () => {
+    const state = makeState({ ap: 2, currentPlayer: "A" });
+    state.players.A.hand = ["fire", "fire", "fire", "fire"]; // 4, room for 1 more
+
+    drawCard(state, "A");
+
+    expect(state.players.A.hand).toHaveLength(5);
+  });
+
+  it("rejects an ordinary Draw once the hand is already at the cap, leaving it unchanged", () => {
+    const state = makeState({ ap: 2, currentPlayer: "A" });
+    state.players.A.hand = ["fire", "fire", "fire", "fire", "fire"]; // already 5
+
+    expect(() => drawCard(state, "A")).toThrow(/maximum/);
+    expect(state.players.A.hand).toHaveLength(5);
+    // A rejected action costs no AP either — same convention every other
+    // illegal action in this file already follows.
+    expect(state.ap).toBe(2);
+  });
+
+  it("draws the full 2 cards from a Water Combo when there's room for both", () => {
+    const state = makeState({ ap: 2, currentPlayer: "A" });
+    place(state, "A", "water", 0, 0);
+    place(state, "A", "water", 0, 1);
+    state.players.A.hand = ["water", "fire"]; // 2 before the play, 1 after -> room for 2
+
+    playCard(state, "A", 0, 0, 2);
+
+    expect(state.players.A.hand).toHaveLength(3); // 1 (after playing) + 2 (Water, uncapped)
+  });
+
+  it("Water Combo draws only 1 card (Partial) when there's room for exactly 1", () => {
+    const state = makeState({ ap: 2, currentPlayer: "A" });
+    place(state, "A", "water", 0, 0);
+    place(state, "A", "water", 0, 1);
+    // 5 cards before the play: the completing "water" card plus 4 others.
+    state.players.A.hand = ["water", "fire", "fire", "fire", "fire"];
+
+    const { combatEvent } = playCard(state, "A", 0, 0, 2);
+
+    // 4 left after playing the completing card, +1 Partial Water draw = 5,
+    // one short of a full +2 because the cap left room for only 1.
+    expect(state.players.A.hand).toHaveLength(5);
+    expect(combatEvent!.effectsApplied).toEqual(["water"]);
+  });
+
+  it("Water Combo draws 0 cards (Partial) when the hand is already at the cap after playing", () => {
+    const state = makeState({ ap: 2, currentPlayer: "A" });
+    place(state, "A", "water", 0, 0);
+    place(state, "A", "water", 0, 1);
+    // 6 cards before the play: the completing card plus 5 others — playing
+    // the completing card alone already leaves exactly 5 (the cap).
+    state.players.A.hand = ["water", "fire", "fire", "fire", "fire", "fire"];
+
+    const { combatEvent } = playCard(state, "A", 0, 0, 2);
+
+    expect(state.players.A.hand).toHaveLength(5); // no room at all for Water's draw
+    // Water still fired (the Combo matched), it just had nothing to add —
+    // same "effect recorded regardless of how much of it could land"
+    // reasoning as a Lightning hit later floored by settleZeroApTurns.
+    expect(combatEvent!.effectsApplied).toEqual(["water"]);
+  });
+
+  it("two simultaneous Water combos split the remaining room between them in order, never exceeding the cap", () => {
+    // Cross shape, all Water (mirrors the existing "stacks two simultaneous
+    // Owner+Fire combos" cross-shape precedent above) — two independent
+    // Water combos from one Play. 3 cards before the play: the completing
+    // card plus 2 others -> 2 left after playing, room for 3 more (to reach
+    // the 5 cap). The FIRST combo's draw (up to 2) uses 2 of that room
+    // (hand -> 4), leaving the SECOND combo only 1 slot of room (hand -> 5)
+    // — 3 cards actually drawn in total, not the uncapped 4, demonstrating
+    // the room is shared and consumed in order across both combos, not
+    // computed once and applied twice.
+    const state = makeState({ ap: 2, currentPlayer: "A" });
+    place(state, "A", "water", 0, 0);
+    place(state, "A", "water", 0, 1);
+    place(state, "A", "water", 1, 1);
+    place(state, "A", "water", 2, 1);
+    state.players.A.hand = ["water", "fire", "fire"];
+
+    const { combatEvent } = playCard(state, "A", 0, 0, 2);
+
+    expect(state.players.A.hand).toHaveLength(5); // 2 (after playing) + 2 + 1, capped at 5, not 2+2+2=6
+    expect(combatEvent!.effectsApplied).toEqual(["water", "water"]);
+  });
+
+  it("does not affect Combo damage or any other effect — only the number of cards actually added", () => {
+    const state = makeState({ ap: 2, currentPlayer: "A" });
+    place(state, "A", "water", 0, 0);
+    place(state, "A", "water", 0, 1);
+    state.players.A.hand = ["water", "fire", "fire", "fire", "fire", "fire"]; // already capped
+    const hpBefore = state.players.B.hp;
+
+    playCard(state, "A", 0, 0, 2);
+
+    // An Owner+Water Combo still deals its full 15 damage regardless of
+    // whether its own Water draw was capped to 0.
+    expect(state.players.B.hp).toBe(hpBefore - 15);
+  });
+
+  it("a fresh game after New Game still deals the normal uncapped 3-card hand", () => {
+    const state = makeState({ status: "finished", winner: "A" });
+    confirmNewGame(state, "A");
+    const result = confirmNewGame(state, "B", queueRandom([0.1, 0.2, 0.3, 0.4, 0.5, 0.6]));
+
+    expect(result.players.A.hand).toHaveLength(3);
+    expect(result.players.B.hand).toHaveLength(3);
+  });
+});
+
 // A verified "no accidental Combo" layout for a fully-occupied 3x3 region —
 // zero lines (row/col/diagonal) share an owner OR a type across all 3 cells.
 // Verified by script, not by hand: the 2nd playtesting revision means a

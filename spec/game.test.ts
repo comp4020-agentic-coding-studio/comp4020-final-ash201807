@@ -656,6 +656,55 @@ it("never leaks one series' turn-timeout broadcast into an unrelated concurrent 
   await wait(200);
 }, turnDurationMs + 5000);
 
+// --- Stage 3 (Hand Limit): 5-card cap, Partial Water overflow ------------
+
+it("rejects an ordinary Draw once the hand reaches the 5-card cap, leaving it unchanged", async () => {
+  const match = await formAPairing();
+  const initialState = lastState(match.a.messages);
+  if (!initialState) throw new Error("expected a state after pairing");
+  // The very first mover is always firstPlayer (§2 First Player), whose own
+  // first turn is exactly 1 AP (engine.ts's own confirmed exception) — a
+  // single Draw (1 AP) spends it all, auto-ending the turn to the opponent
+  // (whose OWN first turn is the normal 2 AP). Exploiting this known,
+  // deterministic AP sequence avoids needing a polling loop: draw once
+  // (hand 3->4, auto-ends to opponent) -> opponent endTurn's their 2 AP away
+  // unused (passing it back) -> actor's now-normal 2-AP turn draws again
+  // (hand 4->5, 1 AP left, still actor's turn) -> the cap-rejection draw.
+  const actorSeat = initialState.currentPlayer;
+  const actor = actorSeat === "A" ? match.a : match.b;
+  const opponent = actorSeat === "A" ? match.b : match.a;
+
+  send(actor.ws, { type: "draw" });
+  await wait(100);
+  expect(lastState(actor.messages)?.players[actorSeat].hand.length).toBe(4);
+  expect(lastState(actor.messages)?.currentPlayer).not.toBe(actorSeat);
+
+  send(opponent.ws, { type: "endTurn" });
+  await wait(100);
+  expect(lastState(actor.messages)?.currentPlayer).toBe(actorSeat);
+
+  send(actor.ws, { type: "draw" });
+  await wait(100);
+  expect(lastState(actor.messages)?.players[actorSeat].hand.length).toBe(5);
+  expect(lastState(actor.messages)?.currentPlayer).toBe(actorSeat); // 1 AP still left
+
+  const countBefore = actor.messages.length;
+  send(actor.ws, { type: "draw" });
+  await wait(200);
+
+  const newMessages = actor.messages.slice(countBefore);
+  expect(newMessages).toHaveLength(1);
+  expect(newMessages[0].type).toBe("error");
+  expect(newMessages[0].message).toMatch(/maximum/);
+  // The rejected Draw didn't change anything — hand still exactly 5, and no
+  // new state was broadcast as a result of it.
+  expect(lastState(actor.messages)?.players[actorSeat].hand.length).toBe(5);
+
+  match.a.ws.close();
+  match.b.ws.close();
+  await wait(200);
+});
+
 // --- Stage 5: best-of-three series lifecycle ----------------------------
 
 it("a mutual abandon in one series never touches an unrelated concurrent series' score or state", async () => {
