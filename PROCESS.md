@@ -1164,6 +1164,254 @@ elsewhere in this file for other states.
 grace periods, restart recovery, persistence schema. No production
 database contact. No commit, no push, no deploy.
 
+## Stage 1 — Combat Events: server-authoritative combo/effect feedback
+
+`engine.ts`'s `applyCombos()` already computed exactly which cells combo'd,
+by owner or by type, and which same-type effects fired — it just never
+surfaced that past `playCard()`'s own return value, so the debug client had
+no way to show *why* HP/hand/AP changed, only the new numbers. Stage 0's
+read-only audit (this conversation) found this; Stage 1 wires the existing
+computation onto the wire rather than re-deriving it anywhere: `playCard()`
+now returns `{state, combatEvent}` (`CombatEvent | null`, new type in
+`src/game/types.ts`), `server.ts` broadcasts a new `combatEvent` message
+(same cross-series-isolation filtering as `broadcastState`) immediately
+before the ordinary `state` push for the same Play, and the client shows a
+4s auto-dismissing banner built entirely from that message. No damage/
+effect/win-condition math changed — zero rule decisions here, purely a
+visibility feature over already-existing engine output.
+
+`CombatEvent` carries a `boardSize` field: the board's size (3 or 5) at the
+moment `detectCombos` ran, captured *before* the same Play's Phase 6/7 can
+clear/resize it. Confirmed necessary, not defensive-for-its-own-sake: a
+Play that both completes a Combo and shrinks the Main Board back to 3x3 in
+that same Play (reachable, `engine.test.ts`'s own confirmed case) would
+otherwise hand the client 5x5 cell coordinates to render against an
+already-3x3 board.
+
+Never persisted — a reconnect only ever gets a fresh `state`, never a
+replayed `combatEvent` (confirmed deliberate: this is a one-shot cause/
+effect explanation, not state a client needs to recover).
+
+6 new engine unit tests (null/Owner/Type/Fire/multi-combo/lethal cases), 1
+new black-box test (a non-combo action never emits the message). All
+existing engine tests pass unchanged.
+
+## Stage 2 — Turn Timer: server-authoritative 45s turn deadline
+
+Per the project owner's five confirmed decisions, closed before
+implementation: **Live** enforcement (a real in-process `setTimeout`, not
+just a check opportunistically run on the next request); disconnect never
+pauses or resets the clock (**Continue** — a disconnected player's turn
+still times out on schedule); the deadline survives a process restart via
+the same persisted-wall-clock-timestamp idiom Stage 8a's own
+`disconnectedAt` already established, rather than inventing a second
+mechanism; 45 seconds is **per turn**, not per action (a Play/Draw that
+doesn't end the turn leaves an in-flight deadline untouched); and the
+server's own deadline at validation time is authoritative, never a
+client-reported one.
+
+`SeriesState` (`persistence.ts`) gains `turnDeadline: number | null` —
+server-level bookkeeping exactly like `disconnectedAt`, never a field on
+`GameState` itself (keeps Stage 9's engine/server boundary: `engine.ts`
+stays unaware). `server.ts` gains `armTurnTimer`/`stopTurnTimer`/
+`scheduleTimer`, called at every actual turn boundary (a brand-new series'
+first turn, an ordinary `endTurn`, AP-exhaustion auto-advance via
+`settleZeroApTurns`, a fresh game starting via `confirmNewGame`) and
+`recoverTurnTimers()`, run once at process start: a deadline already
+elapsed while the process was asleep (Fly auto-stop/resume) gets exactly
+ONE timeout transition applied, never "how many turns would have elapsed"
+— confirmed deliberately, so one long sleep can't silently fast-forward a
+game by several turns unwatched. A still-future deadline gets a live timer
+for its own remaining time, not a fresh full `turnDurationMs`.
+
+`GameState` gains `turnNumber`, incremented every `beginTurn()` call —
+needed because `currentPlayer` alone can't detect "did a turn actually
+happen": two stacked Lightning hits skip an entire turn and leave
+`currentPlayer` back where it started, which is still two real transitions.
+Server-facing signal only, never read inside `engine.ts` beyond its own
+increment.
+
+The turn-deadline check at the message handler (`server.ts`, currently
+`message.type === "play" || "draw" || "endTurn"`) exists because a message
+and this series' own timeout callback can both already be queued for the
+same event-loop tick — the "Live" `setTimeout` alone can't close that one
+window, so an action arriving a tick ahead of its own timer callback is
+still rejected if the deadline it's checked against has already passed.
+`requestQuit`/`rejectQuit`/`confirmNewGame`/`forfeitSeries` are
+deliberately exempt (none are turn-bound actions). **Known fragility, not
+yet fixed:** this is a hardcoded three-way disjunction rather than a
+single "is this a turn-bound action" property — a future protocol addition
+that's turn-bound must remember to add itself to this exact list or it
+silently skips the deadline guard. Flagged for follow-up, not resolved in
+this stage.
+
+Client shows a countdown ticking down to the server's own `turnDeadline`,
+display-only — it decides nothing, same boundary every other client
+display already respects.
+
+4 new black-box tests (auto-timeout + broadcast, rejection of a
+now-out-of-turn action, disconnect-never-pauses, cross-series isolation
+of the timeout); 1 new engine test covering `turnNumber`. All 113 engine
+tests and 24 black-box tests pass.
+
+## Stage 3 — Hand Limit: 5-card cap, Partial Water overflow
+
+Per the project owner's confirmed decisions: a 5-card maximum
+(`MAX_HAND_SIZE`, `engine.ts`) applied uniformly to **both** paths that add
+a card — the ordinary `draw` action and Water's own free draw — rather than
+just one. `draw` rejects outright once the hand is already at the cap: an
+explicit player-chosen action with no effect left to apply is illegal, the
+same convention every other action already follows.
+
+Water's overflow is confirmed **Partial**: draws only as many cards as
+there's room for under the cap (0 if already full), recomputed fresh per
+combo inside the same Phase 5 loop — not computed once before the loop —
+so two simultaneous Water combos correctly split whatever room the first
+one's own draws already used. Never errors: a combo effect that already
+fired has nothing left to reject, it just lands fewer cards. Still recorded
+in `effectsApplied` even when capped to 0 actual cards drawn — the combo
+DID trigger Water, same precedent as a stacked Lightning hit still being
+recorded even once floored to a 0-AP skipped turn.
+
+10 new engine unit tests (cap boundaries, Partial at 1/0 room, simultaneous
+combos splitting room, damage/other effects unaffected, New Game still
+deals an uncapped 3-card starting hand) and 1 new black-box test (an
+ordinary `draw` rejected over the real transport, using the known
+first-turn AP sequence to reach the cap deterministically). Client shows a
+live hand-count (N/5) and disables Draw at the cap as a courtesy only — the
+server rejects it regardless, confirmed unchanged by the test suite. All
+123 engine tests and 25 black-box tests pass.
+
+## Stage 4 — Onboarding & Combo Animation
+
+Two "How to play"/"Combo guide" `<details>` panels added to the lobby,
+every number copied directly from `engine.ts`'s own constants
+(`STARTING_HP`, `STARTING_HAND_SIZE`, `MAX_HAND_SIZE`,
+`OWNER_COMBO_DAMAGE`, `TYPE_ONLY_COMBO_DAMAGE`, `FIRE_EFFECT_DAMAGE`,
+`WATER_DRAW_COUNT`, `NATURE_AP_BONUS`) and `server.ts`'s `turnDurationMs`
+default, never restated from memory — a future rule change leaves this
+visibly stale rather than silently wrong.
+
+Combo animation consumes the existing Stage 1 `combatEvent` message: a
+brief outline flash on the combo'd cells, keyed to the triggering effect's
+own colour (reusing existing CSS tokens, no new hues), plus a floating
+damage-pop number near the defender's HP. Guards against `CombatEvent`'s
+`boardSize` not matching the board size actually being rendered (the
+same-Play shrink case from Stage 1) by skipping the animation outright —
+purely decorative, the banner's own text already carries the full
+information regardless. `prefers-reduced-motion` disables both animations;
+the information itself (damage number, banner text) is never lost, only
+the motion.
+
+Verified end-to-end with two real Playwright browser contexts against a
+running server: onboarding text matches `engine.ts` exactly; a real
+Owner+Fire Combo (engineered via a direct SQLite edit, since reaching one
+through actual random play isn't practical to script — the same
+already-established limitation this repo's test files note elsewhere)
+produced the correct flash classes, banner text, damage-pop, and HP drop.
+
+**Two bugs found in post-hoc read-only review (this conversation,
+2026-11-07) and fixed before push, neither caught by the above
+verification:**
+- The damage-pop (`showDamagePop`, `client/app.js`) was appended into
+  `anchorEl.parentElement` — the inner `.hp-bar` fill's immediate parent,
+  which is the 6px-tall `.hp-bar` element itself (`overflow: hidden` in
+  `index.html`), not the `.stat` container two levels up that the CSS
+  comment ("anchors the Stage 4 damage-pop") actually relies on for
+  `position: relative`. The pop was being clipped and was never visible on
+  screen, only in the DOM. Fixed: appends to
+  `anchorEl.parentElement.parentElement` instead.
+- `pendingComboAnimation` (the queued combo event awaiting the next
+  `render()` to consume it) was not cleared in the `seriesEnded` message
+  handler, unlike `combatEventTimeout`/`turnTimerInterval` which already
+  are. A Play that both completes a Combo and wins the series skips the
+  intervening `state` broadcast that would normally consume it via
+  `playComboAnimation` — left pending, it leaks into the next match's
+  first render. Since a fresh match also starts at `boardSize` 3, the
+  `boardSize` guard passes by coincidence, so the brand-new empty board
+  would flash stale cell coordinates and a stale damage number from the
+  previous series. Fixed: `pendingComboAnimation = null` added to the
+  `seriesEnded` handler alongside the existing timer teardown.
+
+1 new engine test (`boardSize` correctness across a same-Play board
+shrink). All 124 engine tests and 25 black-box tests pass, unaffected by
+either client-only fix above.
+
+**Three more findings from the same review, fixed in a second pass (this
+conversation, same day), none a behaviour change for an already-working
+case — only the failure/maintenance mode around them:**
+
+- **Stage 2's hardcoded three-way action-type disjunction.** The
+  turn-deadline check (`server.ts`) was `message.type === "play" || "draw"
+  || "endTurn"`. Replaced with a `NON_TURN_BOUND_ACTION_TYPES` const
+  (`joinQueue`, `confirmNewGame`, `requestQuit`, `rejectQuit`,
+  `forfeitSeries` — every action already documented as exempt, unchanged)
+  typed `satisfies ClientMessage["type"][]`, and the check inverted to
+  "reject if NOT one of these." Deliberately the safer direction: a future
+  `ClientMessage` variant that's actually turn-bound is now gated by
+  default unless someone remembers to add it to the exemption list, rather
+  than the old shape where a turn-bound addition silently bypassed the
+  guard unless remembered. The `satisfies` clause itself would fail
+  `pnpm typecheck` if a named action type were ever renamed or removed,
+  confirmed by it passing against the real `ClientMessage` union as-is.
+  Behaviourally a no-op for all five named actions and for `play`/`draw`/
+  `endTurn` — same five exempted, same three gated, just expressed as one
+  canonical list instead of duplicated as a literal disjunction.
+- **`recoverTurnTimers()`'s per-series synchronous save.** `handleTurnTimeout`
+  (`server.ts`) gained optional `{ persist, broadcast }` options (both
+  default `true`, so the live-timer-fire call site — the only caller before
+  this — is unaffected). `recoverTurnTimers` now calls it with both `false`
+  and does exactly one `persistence.save(appState)` after its loop, only if
+  the loop actually touched anything (`armTurnTimer` for a never-set
+  deadline, or a timeout) — not one blocking SQLite write per already-expired
+  series found at startup. `broadcast` is skipped in the same call because
+  `recoverTurnTimers()` runs before the HTTP server accepts its first
+  connection, so `sockets` is always empty there regardless.
+- **Three independently-torn-down ephemeral UI timers in `client/app.js`.**
+  `combatEventTimeout`, `pendingComboAnimation`, and `turnTimerInterval` each
+  now register their own teardown via a new `registerEphemeralUi(reset)` /
+  `resetEphemeralUi()` pair, declared once near `showError`; the
+  `seriesEnded` handler calls `resetEphemeralUi()` instead of naming each one
+  by hand. This is the direct fix for the shape of omission that caused the
+  `pendingComboAnimation` bug above — a future fourth ephemeral timer/queued
+  value is included automatically by registering at its own declaration,
+  with nothing left to remember at the `seriesEnded` call site.
+  `errorBanner`'s timeout deliberately was NOT added to this registry: it
+  was never part of `seriesEnded`'s teardown even before Stage 4 existed (a
+  rejection error can legitimately explain why a series just ended — e.g.
+  a rejected out-of-turn action — so clearing it out from under that
+  message would lose the explanation), and folding it in now would be a
+  real behaviour change undertaken while "just" refactoring, not a pure
+  cleanup. Confirmed via `node --check client/app.js` and a full read-back
+  that the four reset bodies are byte-for-byte what the old `seriesEnded`
+  block did inline, so this is a pure reshuffle, not a behaviour change.
+
+Verified by running the result, not just reading it back: `pnpm typecheck`
+and `pnpm test:engine` (124 tests, unchanged) pass; a scratch local server
+(`DB_PATH` pointed at this repo's own gitignored `data/` directory, same
+precedent as Stage 4c, deleted after use) ran the full black-box
+`spec/`/`pnpm test` suite — 25/25 passing, including the real 45s
+turn-timeout test — confirming the Stage 2 deadline-check rewrite rejects
+exactly the same actions it did before and the `recoverTurnTimers` batching
+change didn't break startup recovery (no series were actually
+already-expired at this server's own fresh start, so the `recoveredAny`
+batched-save branch wasn't exercised by this run specifically — the
+per-call-site `persist`/`broadcast` default of `true` keeps the live
+timer-fire path, which several of these 25 tests do exercise, provably
+unchanged).
+
+**Known gap in this verification, flagged not hidden:** no test (automated
+or manual) exercised `recoverTurnTimers` actually finding an
+already-expired series at startup — doing that requires the same
+kill-and-restart-against-the-same-DB-file method Stage 4c established
+(there is no committed automated test for that scenario, per Stage 4c's own
+recorded reasoning for why not), which this pass didn't run. The code
+change itself is narrow (an options bag threaded through one existing
+function, plus one counter and one save call) and was read back
+line-by-line against the diff, but the specific "does the batched save
+actually fire and leave correct state" path is unverified live. Flagged for
+whoever next touches turn-timer recovery, not silently assumed correct.
+
 ## Not yet built
 
 Stage 9's own decision (FIFO matchmaking, concurrent independent matches)

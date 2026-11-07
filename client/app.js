@@ -90,6 +90,32 @@ function setConnectionStatus(connected) {
   connectionStatusTextEl.textContent = connected ? "Connected" : "Disconnected";
 }
 
+// A single registry for "state tied to one match that must not survive past
+// it" — a pending setTimeout/setInterval handle, or just a queued value like
+// pendingComboAnimation. The "seriesEnded" handler below calls
+// resetEphemeralUi() once rather than naming each one individually; each
+// piece of ephemeral UI registers its own reset next to its own declaration
+// instead. This replaces the previous shape (seriesEnded hand-enumerating
+// combatEventTimeout/turnTimerInterval by name) that let a later addition —
+// pendingComboAnimation — go unreset and leak a stale combo flash/damage-pop
+// into the next match (code review, 2026-11-07): a future ephemeral timer or
+// queued value is included automatically just by registering here, with
+// nothing further to remember at this or any other call site.
+const ephemeralUiResets = [];
+function registerEphemeralUi(reset) {
+  ephemeralUiResets.push(reset);
+}
+function resetEphemeralUi() {
+  for (const reset of ephemeralUiResets) reset();
+}
+
+// Deliberately NOT registered with registerEphemeralUi below: unlike the
+// combat-event banner/combo animation/turn timer, this one was never part of
+// seriesEnded's teardown even before this registry existed (a rejection
+// error can legitimately explain why the series just ended, e.g. a
+// now-out-of-turn action — clearing it out from under that message would
+// lose the very explanation a player might still be reading). Kept as a
+// plain timeout, same as before.
 let errorBannerTimeout = null;
 function showError(message) {
   errorBanner.textContent = message;
@@ -109,6 +135,10 @@ function showError(message) {
 // clock.
 const EFFECT_LABELS = { lightning: "Lightning", water: "Water", nature: "Nature", fire: "Fire" };
 let combatEventTimeout = null;
+registerEphemeralUi(() => {
+  clearTimeout(combatEventTimeout);
+  setVisible(combatEventBanner, false);
+});
 function showCombatEvent(event) {
   const whoActed = event.actingPlayer === myPlayer ? "You" : "Your opponent";
   const totalDamage =
@@ -148,6 +178,9 @@ function showCombatEvent(event) {
 // element tint.
 const EFFECT_FLASH_CLASS = { lightning: "combo-flash--lightning", water: "combo-flash--water", nature: "combo-flash--nature", fire: "combo-flash--fire" };
 let pendingComboAnimation = null;
+registerEphemeralUi(() => {
+  pendingComboAnimation = null;
+});
 
 const protocol = location.protocol === "https:" ? "wss:" : "ws:";
 const ws = new WebSocket(`${protocol}//${location.host}/ws`);
@@ -207,10 +240,11 @@ ws.addEventListener("message", (event) => {
     myPlayer = null;
     lastState = null;
     lastSeries = null;
-    clearTimeout(combatEventTimeout);
-    setVisible(combatEventBanner, false);
-    clearInterval(turnTimerInterval);
-    setVisible(turnTimerEl, false);
+    // Tears down every piece of UI registered as tied to one match's
+    // lifetime (combat-event banner, pending combo animation, turn timer) in
+    // one call — see registerEphemeralUi's own comment for why this replaced
+    // naming each one here individually.
+    resetEphemeralUi();
     setVisible(gamePanel, false);
     setVisible(lobbyPanel, true);
     setVisible(joinQueueBtn, true);
@@ -284,6 +318,10 @@ function render() {
 // rapid sequence of state messages (e.g. several AP-exhaustion auto-turns)
 // never leaves more than one ticking at once.
 let turnTimerInterval = null;
+registerEphemeralUi(() => {
+  clearInterval(turnTimerInterval);
+  setVisible(turnTimerEl, false);
+});
 function renderTurnTimer(state, series) {
   clearInterval(turnTimerInterval);
   if (state.status !== "active" || !series || series.turnDeadline === null) {
@@ -424,7 +462,11 @@ function showDamagePop(anchorEl, amount) {
   pop.className = "damage-pop";
   pop.textContent = `-${amount}`;
   pop.setAttribute("aria-hidden", "true");
-  anchorEl.parentElement.appendChild(pop);
+  // anchorEl is the inner <span id="my-hp-bar"/"opp-hp-bar"> fill; its direct
+  // parent is .hp-bar (overflow:hidden, 6px tall) which would clip the pop
+  // entirely — .stat (one level further up) is the actual position:relative
+  // anchor the CSS above targets.
+  anchorEl.parentElement.parentElement.appendChild(pop);
   const remove = () => pop.remove();
   pop.addEventListener("animationend", remove, { once: true });
   setTimeout(remove, 1500); // fallback for prefers-reduced-motion (no animationend fires)

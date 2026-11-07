@@ -33,6 +33,29 @@ function newSeriesId(): string {
   return randomBytes(16).toString("hex");
 }
 
+// Stage 2 (Turn Timer), tightened in review: names every ClientMessage
+// variant deliberately exempt from the turn-deadline check below —
+// `joinQueue` (handled before a seriesId is even resolved, never reaches
+// that check) and the four lifecycle/meta actions
+// (`confirmNewGame`/`requestQuit`/`rejectQuit`/`forfeitSeries`) whose own
+// existing "no turn-order check" comments already establish they're not
+// turn-bound. `satisfies ClientMessage["type"][]` catches a typo or a
+// renamed message type at compile time. Anything NOT named here is
+// turn-bound by default — the safe direction: a future `ClientMessage`
+// variant added to protocol.ts without being added here gets gated by the
+// deadline check rather than silently bypassing it, the opposite of the
+// risk in the three-way `"play" || "draw" || "endTurn"` disjunction this
+// replaced (a new turn-bound action there would need remembering to add
+// itself to that list, or it silently skips the guard).
+const NON_TURN_BOUND_ACTION_TYPES = [
+  "joinQueue",
+  "confirmNewGame",
+  "requestQuit",
+  "rejectQuit",
+  "forfeitSeries",
+] satisfies ClientMessage["type"][];
+const NON_TURN_BOUND_ACTIONS: ReadonlySet<string> = new Set(NON_TURN_BOUND_ACTION_TYPES);
+
 export interface ServerOptions {
   // How long a disconnected SEATED session keeps its player slot before its
   // whole series forfeits — long enough that an ordinary page reload (close
@@ -226,7 +249,15 @@ export function createServer(persistence: Persistence, options: ServerOptions = 
   // message handler below, there is no settleGameOutcome/concludeSeries
   // fold-in needed here, the game is guaranteed to still be "active"
   // afterward.
-  function handleTurnTimeout(seriesId: string): void {
+  // `persist`/`broadcast` default to true for the ordinary live-timer-fire
+  // path (the only caller for most of this function's life); recoverTurnTimers
+  // below passes both false so it can batch every series it recovers into
+  // ONE save at the end instead of one synchronous SQLite write per
+  // already-expired series — broadcasting is skipped there too since it runs
+  // before the HTTP server accepts its first connection, so `sockets` is
+  // always empty and a broadcast call would be a guaranteed no-op anyway.
+  function handleTurnTimeout(seriesId: string, options: { persist?: boolean; broadcast?: boolean } = {}): void {
+    const { persist = true, broadcast = true } = options;
     turnTimers.delete(seriesId); // this timer already fired; nothing left to clear
     const series = appState.seriesList[seriesId];
     if (!series) return; // series concluded before this fired
@@ -239,8 +270,8 @@ export function createServer(persistence: Persistence, options: ServerOptions = 
 
     armTurnTimer(seriesId); // the next player's turn just began; time it too
 
-    persistence.save(appState);
-    broadcastState(seriesId);
+    if (persist) persistence.save(appState);
+    if (broadcast) broadcastState(seriesId);
   }
 
   // Runs once, when this process starts — never per-request — to recover
@@ -253,21 +284,38 @@ export function createServer(persistence: Persistence, options: ServerOptions = 
   // would let one long sleep silently fast-forward a game by several turns
   // with nobody watching. A deadline still in the future gets a live timer
   // scheduled for its own remaining time, not a fresh full turnDurationMs.
+  //
+  // Every series this touches (armTurnTimer for a never-set deadline, or
+  // handleTurnTimeout for an elapsed one) mutates appState in memory; rather
+  // than handleTurnTimeout's own synchronous persistence.save firing once per
+  // already-expired series found here (a real cost after a long Fly sleep
+  // with several stale series — each is a blocking SQLite write before the
+  // server can start accepting its first connection), every mutation in this
+  // loop is unpersisted (armTurnTimer never persists on its own either) and
+  // saved exactly once, after the loop, only if anything here actually
+  // changed appState.
   function recoverTurnTimers(): void {
+    let recoveredAny = false;
     for (const [seriesId, series] of Object.entries(appState.seriesList)) {
       const game = series.games[series.games.length - 1];
       if (!game || game.status !== "active") continue;
+      recoveredAny = true;
       if (series.turnDeadline === null) {
         armTurnTimer(seriesId);
         continue;
       }
       const remaining = series.turnDeadline - Date.now();
       if (remaining <= 0) {
-        handleTurnTimeout(seriesId);
+        handleTurnTimeout(seriesId, { persist: false, broadcast: false });
       } else {
         scheduleTimer(seriesId, remaining);
       }
     }
+    // One write for however many series this loop touched (0 is a no-op,
+    // same as every other save-after-mutation site in this file never
+    // saving when nothing changed) — not one write per already-expired
+    // series, which handleTurnTimeout's own default would otherwise do.
+    if (recoveredAny) persistence.save(appState);
   }
 
   // Stage 6: the one "a series has ended, tell whoever's owed a message,
@@ -606,11 +654,12 @@ export function createServer(persistence: Persistence, options: ServerOptions = 
         // moment it validates this action is authoritative — never a
         // client-reported time. Turn-order/AP/legality are still engine.ts's
         // own job below; this only catches "too late," which engine.ts has
-        // no concept of. requestQuit/rejectQuit/confirmNewGame/forfeitSeries
-        // are deliberately exempt — none of them are turn-bound actions (see
-        // their own existing "no turn-order check" comments).
+        // no concept of. Gated on NOT being one of the explicitly named
+        // non-turn-bound actions above, rather than an explicit allowlist of
+        // turn-bound ones — see that const's own comment for why this
+        // direction is the safe one.
         if (
-          (message.type === "play" || message.type === "draw" || message.type === "endTurn") &&
+          !NON_TURN_BOUND_ACTIONS.has(message.type) &&
           series.turnDeadline !== null &&
           Date.now() >= series.turnDeadline
         ) {
