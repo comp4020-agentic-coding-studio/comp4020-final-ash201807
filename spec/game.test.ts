@@ -48,29 +48,40 @@ import WebSocket from "ws";
 // var so it knows how long to wait, defaulting to the real 30s if unset.
 // Running locally against the real default makes this file take
 // significantly longer; see the TURN_DURATION_MS comment immediately below
-// before shortening it for a fast local run — the two can't be shortened
-// independently of each other.
-const disconnectGraceMs = Number(process.env.DISCONNECT_GRACE_MS ?? 30_000);
-// Stage 2 (Turn Timer): same override pattern as disconnectGraceMs above,
-// for the same reason — the turn-timeout tests actually wait out the
-// server's own configured TURN_DURATION_MS (src/server/index.ts) rather
-// than mocking time.
+// for why DISCONNECT_GRACE_MS is the only one of the two safe to shorten.
 //
-// UX fix (2026-11-08): DISCONNECT_GRACE_MS must stay LONGER than
-// TURN_DURATION_MS whenever both are shortened for a fast run — the
-// OPPOSITE ratio from the real production defaults (30s grace < 45s turn).
-// Before this fix, the disconnect grace period was only ever checked
-// lazily on an unrelated later request, so a shorter grace period never
-// actually fired on its own before a turn-timeout test's own wait
-// finished; now it's a live, self-firing timer like this one always was,
+// UX fix (2026-11-08): must stay LONGER than TURN_DURATION_MS whenever
+// shortened for a fast run — the OPPOSITE ratio from the real production
+// defaults (30s grace < 45s turn). Before this fix, the disconnect grace
+// period was only ever checked lazily on an unrelated later request, so a
+// shorter grace period never actually fired on its own before a
+// turn-timeout test's own wait finished; now it's a live, self-firing timer,
 // so whichever deadline is numerically SHORTER really does win the race.
 // "keeps the timer running... while disconnected" below specifically needs
 // the TURN deadline to be the one that fires (that's the whole test), which
 // means grace must be the LONGER of the two here, even though that's
 // backwards from the live app's own ratio. Get this backwards locally and
 // that test settles the whole series by disconnect-forfeit before the turn
-// timer ever gets a chance to prove anything (CI's own checks.yml sets
-// 5000/2000; keep local overrides in the same ratio).
+// timer ever gets a chance to prove anything (CI's own checks.yml sets this
+// to 50000, keeping TURN_DURATION_MS at its real 45s — see that comment for
+// why TURN_DURATION_MS itself must NOT be shortened to compensate).
+const disconnectGraceMs = Number(process.env.DISCONNECT_GRACE_MS ?? 30_000);
+// Stage 2 (Turn Timer): same override pattern as disconnectGraceMs above,
+// for the same reason — the turn-timeout tests actually wait out the
+// server's own configured TURN_DURATION_MS (src/server/index.ts) rather
+// than mocking time.
+//
+// UX fix (2026-11-08): do NOT shorten this to speed up disconnectGraceMs's
+// own ordering requirement above — tried first, reverted. This file forms
+// dozens of formAPairing() pairings across its whole run, and after the
+// disconnect-reap fix each one's own turn timer is a real, independently
+// scheduled setTimeout; shortening TURN_DURATION_MS makes EVERY one of
+// those pairings auto-end its own turn on that same short cycle for the
+// rest of the run, each firing persistence.save() repeatedly against one
+// shared long-lived server process — confirmed (not assumed) to starve
+// that process enough to make unrelated, ordinary-short-wait tests
+// elsewhere in this file fail too. Leave this at the real 45s and shorten
+// DISCONNECT_GRACE_MS past it instead (see its own comment above).
 const turnDurationMs = Number(process.env.TURN_DURATION_MS ?? 45_000);
 const baseUrl = inject("baseUrl");
 const wsUrl = baseUrl.replace(/^http/, "ws") + "/ws";

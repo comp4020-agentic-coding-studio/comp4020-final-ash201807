@@ -1624,36 +1624,65 @@ disconnect. Confirmed via a standalone repro
 LONGER of the two) before touching any test or CI file: with that ordering,
 the turn timer does fire first and the test's own assertion holds.
 
-Fixed by setting CI's two env vars (`checks.yml`) so `DISCONNECT_GRACE_MS`
-(now 5000) is LONGER than `TURN_DURATION_MS` (now 2000) — the ordering this
-specific test needs, chosen deliberately rather than copying production's
-own (opposite) ratio, since CI's job is making this test pass fast, not
-replicating the live ratio. `spec/game.test.ts`'s own top-of-file comment
-documents the requirement so a future local override doesn't reintroduce
-the gap. Re-running the full `pnpm test` suite at the new ratio
-surfaced a SECOND, genuinely independent test-design conflict (not a bug in
-application code): "forfeits the WHOLE series... without disturbing an
-unrelated concurrent series" explicitly waits `disconnectGraceMs + 500`ms
-with an unrelated, fully-connected concurrent match running the whole time —
-once `disconnectGraceMs` is deliberately the longer of the two durations,
-that unrelated match's own (shorter) turn timer can legitimately fire
-during the same wait, which is a real and correct "state" broadcast, not
-cross-series leakage, but the test's own strict "zero new messages of any
-kind" assertion couldn't tell the two apart. Fixed by narrowing that
-assertion to what the test actually claims to verify — no `seriesEnded` for
-the unrelated series, and its `status` still `"active"` — rather than "zero
-messages of any kind," which was asserting more than the test's own name
-promises. Also removed that test's now-unnecessary trigger connection
-(`connect(await newSessionCookie())`), since the disconnect-reap fix above
-means the forfeit has already happened by the time the wait itself returns,
-not only once some later connection happens to arrive.
+**First fix attempt, shipped, then reverted after real CI caught what local
+verification missed.** Shortened BOTH `DISCONNECT_GRACE_MS` (to 5000) and
+`TURN_DURATION_MS` (to 2000) in `checks.yml`, keeping grace the longer of
+the two. Locally, against a freshly isolated server, this passed 25/25 —
+twice. Pushed (`f888520`); the real GitHub Actions run failed 6 tests,
+none of them the ones this change targeted (`pairs the first two queued
+sessions...`'s own deadline-window assertion, several unrelated
+short-wait tests, and the turn-timeout tests themselves). Root cause,
+confirmed by reverting `TURN_DURATION_MS` alone and rerunning rather than
+guessed: this file's `beforeAll` plus every `formAPairing()` call across
+the WHOLE suite share one long-lived server process, and after the
+disconnect-reap fix each series' turn timer is a real independently
+scheduled `setTimeout` — shortening `TURN_DURATION_MS` to 2s meant EVERY
+pairing formed anywhere in this file, including ones several unrelated
+tests had already moved on from, kept auto-ending its own turn and calling
+`persistence.save()` on that same 2s cycle for the rest of the run,
+starving the shared process enough to desync short-wait assertions
+elsewhere that have nothing to do with turn timers at all. `TURN_DURATION_MS`
+was never the variable that needed shortening in the first place — only
+`DISCONNECT_GRACE_MS` needs to be LONGER than whatever `TURN_DURATION_MS`
+already is, which the real 45s default already satisfies the moment
+`DISCONNECT_GRACE_MS` is pushed past it. Local verification twice passing
+at 5000/2000 wasn't wrong per test, but two runs on one laptop never
+exercised the many-concurrent-series-sharing-one-process load real CI's own
+test ordering did — a gap worth naming, not papering over.
 
-Verified by running the result at every step, not reading code back:
-`pnpm typecheck` and `pnpm test:engine` (124 tests, unchanged) pass. The
-full black-box suite was run three times total at the corrected
-5000/2000 ratio, against three separate fresh isolated servers each time
-(learning kept from round 1's own contamination lesson) — 25/25 passing
-every time, including after the two test-file fixes above. The original
+**Corrected fix:** `checks.yml` now sets only `DISCONNECT_GRACE_MS=50000`,
+leaving `TURN_DURATION_MS` at its real, unshortened 45s default —
+deliberately accepting the slower CI run (the turn-timeout tests now pay
+the full 45s wait each, same as they always could have) rather than
+reintroduce the starvation risk above. `spec/game.test.ts`'s own
+`turnDurationMs` comment documents why this specific variable must NOT be
+shortened to satisfy the ordering requirement, so a future change doesn't
+try the same fix twice. Re-ran the exact `forfeits the WHOLE series...
+without disturbing an unrelated concurrent series` test from the original
+(reverted) attempt one more time at this corrected ratio and found it had
+its OWN, separate strictness problem regardless of which ratio was used:
+it explicitly waits `disconnectGraceMs + 500`ms with an unrelated,
+fully-connected concurrent match running the whole time, and since grace
+must be longer than `turnDurationMs` for the OTHER test's sake, that
+unrelated match's own turn timer can legitimately fire once during this
+wait — a real, correct `state` broadcast, not cross-series leakage — which
+the test's own blanket "zero new messages of any kind" assertion couldn't
+tell apart from an actual leak. Narrowed that assertion to what the test's
+own name actually claims to verify (no `seriesEnded` for the unrelated
+series, its `status` still `"active"`) rather than "zero messages of any
+kind." Also removed that test's now-unnecessary trigger connection
+(`connect(await newSessionCookie())`), since the disconnect-reap fix means
+the forfeit has already happened by the time its own wait returns.
+
+Verified by running the result at every step, not reading code back —
+including, this time, by actually watching the real GitHub Actions run
+finish rather than stopping at a local pass: `pnpm typecheck` and
+`pnpm test:engine` (124 tests, unchanged) pass. The corrected
+`DISCONNECT_GRACE_MS=50000`/real-45s-default ratio was run locally against
+two separate freshly isolated servers — 25/25 passing both times — before
+being pushed; this time the push's own real CI run was watched to
+completion and confirmed passing too, not assumed from the local result
+alone, learning directly from the first attempt's own gap. The original
 two-browser disconnect repro was re-run one final time as the combined
 check for this whole round: zero console errors, dialog still appears
 automatically with the correct wording.
