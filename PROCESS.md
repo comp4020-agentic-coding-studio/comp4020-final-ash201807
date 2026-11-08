@@ -1674,18 +1674,60 @@ kind." Also removed that test's now-unnecessary trigger connection
 (`connect(await newSessionCookie())`), since the disconnect-reap fix means
 the forfeit has already happened by the time its own wait returns.
 
-Verified by running the result at every step, not reading code back —
-including, this time, by actually watching the real GitHub Actions run
-finish rather than stopping at a local pass: `pnpm typecheck` and
-`pnpm test:engine` (124 tests, unchanged) pass. The corrected
-`DISCONNECT_GRACE_MS=50000`/real-45s-default ratio was run locally against
-two separate freshly isolated servers — 25/25 passing both times — before
-being pushed; this time the push's own real CI run was watched to
-completion and confirmed passing too, not assumed from the local result
-alone, learning directly from the first attempt's own gap. The original
-two-browser disconnect repro was re-run one final time as the combined
-check for this whole round: zero console errors, dialog still appears
-automatically with the correct wording.
+**Second fix attempt, also failed on real CI, for a reason local testing
+structurally could never surface.** The `DISCONNECT_GRACE_MS=50000`/
+real-45s-default ratio passed locally against two separate freshly
+isolated servers (25/25, twice) before being pushed (`c1485c4`); this time
+the real GitHub Actions run WAS watched to completion rather than assumed
+passing from the local result — and it still failed, exactly one test:
+`forfeits the WHOLE series... without disturbing an unrelated concurrent
+series`, at `survivor.messages` never containing `seriesEnded` at all.
+Root cause, confirmed by deliberately reproducing the exact gap locally
+before touching `checks.yml` again (not guessed): `checks.yml`'s
+`docker run` line sets `DISCONNECT_GRACE_MS=50000` only inside the
+container running the SERVER; `spec/game.test.ts` itself reads the same
+env var, but from the GitHub Actions runner's own shell, which never saw
+it — only `APP_URL` was passed to the `Run the spec` step. The test
+computed its own wait against the unset 30s default while the server
+underneath was actually configured for 50s, so the test checked roughly
+20s before the real grace period it was supposed to be waiting out had
+elapsed. This gap could never show up in any local run across this whole
+investigation, because running the server and `pnpm test` from the same
+terminal always exports `DISCONNECT_GRACE_MS` into both at once — there
+was no way to accidentally reproduce the CI-specific split without
+deliberately setting the server's env var in one shell and withholding it
+from the one running `pnpm test`, which is exactly what was done to
+confirm this diagnosis: the exact same failure, same assertion, same line
+number as the real CI log, reproduced on demand. Fixed by also setting
+`DISCONNECT_GRACE_MS: 50000` in the `Run the spec` step's own `env:`
+block, so the value reaches both the container and the runner shell
+reading it directly.
+
+Verified by running the result at every step, not reading code back,
+across all three fix attempts in this round: `pnpm typecheck` and
+`pnpm test:engine` (124 tests, unchanged) pass throughout. This final
+fix's exact failure mode was reproduced locally first (server on 50000ms,
+test shell deliberately left on the 30s default — same failure, same
+line), then the corrected (both-sides-matched) configuration was verified
+locally (25/25) before being pushed a third time; that push's own real
+GitHub Actions run was watched to completion this time too, and passed —
+`check` and `deploy` both green, the live site re-verified serving this
+round's changes afterward. The original two-browser disconnect repro was
+re-run one final time as the combined check for this whole round: zero
+console errors, dialog still appears automatically with the correct
+wording.
+
+**What this round's own process actually demonstrated, worth naming
+explicitly:** a local pass is not evidence a CI-specific environment-
+variable wiring gap is fixed — two separate local-only mistakes in this
+one round (the `TURN_DURATION_MS` starvation issue, then this
+container/runner env-var split) both passed locally and both only
+surfaced once the real GitHub Actions run was actually watched rather than
+assumed from a local result. Both are now fixed and both were confirmed
+by watching a real CI run succeed, not by local testing alone — the
+discipline this repo's `CLAUDE.md` already asks for ("verify by actually
+running the result"), applied here specifically to CI itself as the thing
+being verified, not just the application.
 
 **Three further, independent UI follow-ups, same session:**
 - **Turn timer colour now also encodes whose turn it is**, not just

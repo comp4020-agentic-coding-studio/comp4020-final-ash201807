@@ -56,9 +56,20 @@ jobs:
           # to prove it isn't paused by the disconnect.
           docker run -d --init --name app -p 8080:8080 -e PORT=8080 -e DISCONNECT_GRACE_MS=50000 --tmpfs /data app
       - name: Run the spec
+        # spec/game.test.ts reads DISCONNECT_GRACE_MS itself, from the
+        # runner's OWN shell — not from the container's env above, which
+        # only the server process inside docker run sees. Without also
+        # setting it here, the test computed its own waits against the
+        # 30s default while the server actually ran on 50s, so an earlier
+        # version of this workflow (DISCONNECT_GRACE_MS=50000 only on the
+        # docker run line) had the test give up ~20s before the server-side
+        # grace period it was supposed to be waiting out had even elapsed —
+        # caught by watching a real CI run fail, not by local testing, which
+        # always exports both into the same shell and so never hit this.
         run: pnpm check
         env:
           APP_URL: http://localhost:8080
+          DISCONNECT_GRACE_MS: 50000
       - name: Show the app's output
         # what the container printed, so a crash or slow boot is visible
         if: ${{ failure() }}
