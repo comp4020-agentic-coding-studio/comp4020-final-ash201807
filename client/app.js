@@ -45,6 +45,7 @@ const connectionStatusTextEl = document.getElementById("connection-status-text")
 const myHpBarEl = document.getElementById("my-hp-bar");
 const oppHpBarEl = document.getElementById("opp-hp-bar");
 const combatEventBanner = document.getElementById("combat-event-banner");
+const effectIconRowEl = document.getElementById("effect-icon-row");
 
 // Display-only scale for the HP bar. The server doesn't send max HP; this
 // mirrors engine.ts's STARTING_HP and must be updated if that changes. HP
@@ -76,6 +77,24 @@ const CARD_TYPE_ICONS = {
 function log(message) {
   logEl.textContent += message + "\n";
   logEl.scrollTop = logEl.scrollHeight;
+}
+
+// UX pass (2026-11-08): the "Combo guide" onboarding panel's effect icon
+// row, built from the same CARD_TYPE_ICONS/EFFECT_LABELS constants the real
+// hand/board and combat-event banner already use — never a second,
+// hand-copied set of markup that could drift from the real icons if those
+// ever change. Static (no game state involved), so this runs once at
+// load, not from render().
+function renderEffectIconRow() {
+  for (const type of ["fire", "lightning", "water", "nature"]) {
+    const wrapper = document.createElement("div");
+    wrapper.className = "effect-icon";
+    wrapper.innerHTML = CARD_TYPE_ICONS[type];
+    const label = document.createElement("span");
+    label.textContent = EFFECT_LABELS[type];
+    wrapper.appendChild(label);
+    effectIconRowEl.appendChild(wrapper);
+  }
 }
 
 // C1: visibility is a class toggle (index.html's .is-hidden) rather than an
@@ -134,20 +153,50 @@ function showError(message) {
 // never depends on this banner, so it's safe to let it expire on its own
 // clock.
 const EFFECT_LABELS = { lightning: "Lightning", water: "Water", nature: "Nature", fire: "Fire" };
+renderEffectIconRow(); // declared above; EFFECT_LABELS/CARD_TYPE_ICONS are both defined by this point
+// UX pass (2026-11-08): the banner named which effects fired but not what
+// they actually did — spelled out here using the same fixed numbers as the
+// "Combo guide" onboarding panel (engine.ts's own WATER_DRAW_COUNT=2,
+// NATURE_AP_BONUS=1, and Lightning's fixed -1 AP), worded relative to
+// `actedOnSelf` (true when the combo-completing player is the one reading
+// this banner) since Lightning/Fire land on the OPPONENT of whoever
+// completed the combo while Water/Nature benefit the completer themselves
+// (see engine.ts's applyCombos: pendingLightning[opponent] vs.
+// hand/ap on state.players[actingPlayer]/state.ap). Fire's own damage is
+// already folded into the banner's headline total above, so it's named here
+// without restating a number. Water's actual draw can be fewer than 2 if
+// the hand was close to the cap — CombatEvent doesn't carry the real count
+// drawn (only that Water fired), so this is phrased as the nominal rule,
+// same hedge the onboarding panel already uses for the same reason.
+function describeEffect(effect, actedOnSelf) {
+  switch (effect) {
+    case "fire":
+      return "Fire (bonus damage already counted above)";
+    case "lightning":
+      return actedOnSelf ? "Lightning (opponent is -1 AP next turn)" : "Lightning (you are -1 AP next turn)";
+    case "water":
+      return actedOnSelf ? "Water (+2 cards, fewer if hand was near full)" : "Water (opponent +2 cards, fewer if their hand was near full)";
+    case "nature":
+      return actedOnSelf ? "Nature (+1 AP this turn)" : "Nature (opponent +1 AP this turn)";
+    default:
+      return EFFECT_LABELS[effect];
+  }
+}
 let combatEventTimeout = null;
 registerEphemeralUi(() => {
   clearTimeout(combatEventTimeout);
   setVisible(combatEventBanner, false);
 });
 function showCombatEvent(event) {
-  const whoActed = event.actingPlayer === myPlayer ? "You" : "Your opponent";
+  const actedOnSelf = event.actingPlayer === myPlayer;
+  const whoActed = actedOnSelf ? "You" : "Your opponent";
   const totalDamage =
     event.combos.reduce((sum, c) => sum + c.damage, 0) + event.fireBonusDamage;
   const comboWord = event.combos.length > 1 ? "combos" : "combo";
   const kinds = event.combos.map((c) => (c.ownerMatch ? "Owner" : "Type")).join(" + ");
   let text = `${whoActed} completed ${event.combos.length} ${kinds} ${comboWord} for ${totalDamage} damage.`;
   if (event.effectsApplied.length > 0) {
-    const effectWords = event.effectsApplied.map((e) => EFFECT_LABELS[e]);
+    const effectWords = event.effectsApplied.map((e) => describeEffect(e, actedOnSelf));
     text += ` Effect: ${effectWords.join(", ")}.`;
   }
   combatEventBanner.textContent = text;

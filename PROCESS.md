@@ -1412,6 +1412,78 @@ line-by-line against the diff, but the specific "does the batched save
 actually fire and leave correct state" path is unverified live. Flagged for
 whoever next touches turn-timer recovery, not silently assumed correct.
 
+## UX pass (2026-11-08) — effect clarity, board contrast, onboarding diagrams
+
+Client-only visual/clarity pass, not driven by a design review in this
+conversation — each change is a direct response to specific feedback on the
+already-shipped Stage 4 client. No protocol, server, or engine change; same
+"client renders, never decides" boundary every prior client stage already
+respects.
+
+- **Combat banner now says what an effect actually did**, not just its name.
+  `describeEffect(effect, actedOnSelf)` (`client/app.js`) replaces the old
+  `EFFECT_LABELS` lookup in `showCombatEvent` with the same fixed numbers the
+  Combo guide onboarding panel already quotes from `engine.ts`
+  (`WATER_DRAW_COUNT`, `NATURE_AP_BONUS`, Lightning's fixed -1 AP), worded
+  relative to `actedOnSelf` since Lightning/Fire land on the Combo-completer's
+  *opponent* while Water/Nature benefit the completer. Fire isn't restated as
+  a number here since its damage is already folded into the banner's own
+  headline total. Water's wording is hedged ("fewer if hand was near full")
+  rather than claiming an exact count, since `CombatEvent` doesn't carry how
+  many cards Water actually drew, only that it fired — the same hedge the
+  onboarding panel already uses for the same reason.
+- **Combo guide gained two SVG diagrams** (one per Combo kind) and an
+  **effect icon row**, both in `client/index.html`'s onboarding panel. The
+  icon row is built by a new `renderEffectIconRow()` (`client/app.js`) from
+  the same `CARD_TYPE_ICONS`/`EFFECT_LABELS` constants the real hand/board
+  already render from, run once at load since it's static — never a second,
+  hand-copied set of icon markup that could drift from the real ones. The
+  diagrams are fixed decorative SVGs, `aria-hidden`, reusing the board's own
+  new owner-color tokens (below) so "A" in the diagram is the same blue the
+  live board actually shows.
+- **Board owner colors replaced** for contrast: `--color-owner-a-border`
+  `#2a5c94` / `--color-owner-b-border` `#b23a33` (blue/red) replace the old
+  sage/apricot `--color-primary-strong`/`--color-accent-strong` pairing on
+  `#board` only — hand cards, icons, and every other use of
+  `--color-primary`/`--color-accent` are untouched. Contrast checked the same
+  way Stage A's own tokens were (WCAG 2.1 relative-luminance, not eyeballed):
+  owner-a border vs. `--color-surface` 6.87:1, vs. `--color-bg` 6.34:1;
+  owner-b border vs. `--color-surface` 5.92:1, vs. `--color-bg` 5.47:1 — both
+  clear the 3:1 non-text-UI threshold by a wide margin.
+- **Turn timer moved out of the shared topbar text row** into its own
+  bordered card directly underneath (same visual weight class as the
+  HP/AP `.stat` cards), per feedback that it was easy to miss sharing a line
+  with the turn indicator.
+- **Hand kept to one row** (`flex-wrap: nowrap; overflow-x: auto`,
+  `flex-shrink: 0` on each card) instead of wrapping to a second row, per
+  feedback that a wrapped second row pushed the turn-timer card around and
+  made it harder to spot. `MAX_HAND_SIZE` (5) means the row scrolls only on
+  a narrow viewport; cards never shrink to fit.
+
+Verified by running the result, not just reading it back: `pnpm typecheck`
+and `pnpm test:engine` (124 tests, unchanged) pass. The black-box suite was
+run twice — the first run, against a server a manual two-browser check was
+also connected to, showed one unrelated failure (a disconnect-timeout test
+asserting which player's turn it ended up being) caused by the manual
+session competing for the same shared FIFO queue, not by this pass; a clean
+rerun against an isolated server with nothing else connected passed 25/25,
+confirming the first result was contamination, not a regression. Visual
+check via headless Chromium (two independent browser contexts, a real
+paired match): lobby, "How to play", and the new Combo guide diagrams/icon
+row all render correctly; a placed card shows the new owner-a blue
+border/fill in a live game; the turn-timer card renders as its own bordered
+element; `#hand`'s computed style confirmed `flex-wrap: nowrap` /
+`overflow-x: auto` as shipped. Zero console errors across every check.
+**Not verified**: an actual 5-card hand's scroll behavior under a narrow
+viewport during live play — filling a real hand to 5 requires spending AP
+across several real turns, which proved too fiddly to force deterministically
+through a scripted browser session within this pass; the computed-style
+check above confirms the CSS is wired correctly, but nobody has watched a
+full hand actually scroll on screen.
+
+**Not touched, confirmed:** `src/`, `spec/` — no server, engine, or protocol
+change. Production database: untouched. No push, no deploy.
+
 ## Not yet built
 
 Stage 9's own decision (FIFO matchmaking, concurrent independent matches)
