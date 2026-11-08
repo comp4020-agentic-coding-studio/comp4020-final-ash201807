@@ -823,6 +823,19 @@
           border-color 0.15s ease,
           background-color 0.15s ease;
       }
+      /* UX pass (2026-11-08, round 4): thickened from the base 1px per
+         feedback that the owner-colour border was too subtle to notice —
+         border-width set directly here (not just border-color) so this
+         is visibly bolder than the plain neutral border every other
+         hand-card state still uses, not just a different hue at the same
+         weight. padding reduced by the same 2px the width grew by, so the
+         card's own outer box size stays identical to the unselected case
+         above — same trick .selected already uses for its own 2px border. */
+      #hand button.owner-a,
+      #hand button.owner-b {
+        border-width: 3px;
+        padding: calc(var(--space-3) - 2px);
+      }
       #hand button.owner-a {
         border-color: var(--color-owner-a-border);
       }
@@ -841,11 +854,17 @@
       #hand button:hover:not(:disabled) {
         background: var(--color-primary-subtle);
       }
+      /* UX pass (2026-11-08, round 4): border-width/padding match the
+         owner-a/-b rule above exactly (3px / -2px), not this rule's own
+         previous 2px/-1px — every hand card now always carries an owner
+         class, so without this a selected card's border would visibly
+         thin out and the card would jiggle by 1px from the padding
+         mismatch the moment it's selected. */
       #hand button.selected {
-        border-width: 2px;
+        border-width: 3px;
         background: var(--color-primary-subtle);
         transform: translateY(-4px);
-        padding: calc(var(--space-3) - 1px);
+        padding: calc(var(--space-3) - 2px);
       }
       #hand button.selected svg {
         background: var(--color-surface);
@@ -936,8 +955,17 @@
           min-height: 112px;
           padding: var(--space-2);
         }
+        /* UX pass (2026-11-08, round 4): every hand card now always carries
+           an owner-a/-b class with its own 3px border (see the base #hand
+           button.owner-a/-b rule) — padding re-derived from --space-2 at
+           this narrower width the same way, so the border thickening
+           doesn't grow the card's outer box at narrow viewports either. */
+        #hand button.owner-a,
+        #hand button.owner-b {
+          padding: calc(var(--space-2) - 2px);
+        }
         #hand button.selected {
-          padding: calc(var(--space-2) - 1px);
+          padding: calc(var(--space-2) - 2px);
         }
         #hand button svg {
           padding: var(--space-2);

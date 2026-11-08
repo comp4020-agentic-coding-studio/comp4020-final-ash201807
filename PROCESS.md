@@ -1764,6 +1764,47 @@ rule changes; `protocol.ts` — no new message types, this is purely
 server-internal timer plumbing plus client-only display changes. Production
 database: untouched.
 
+## UX pass (2026-11-08, round 4) — thicker own-hand owner borders
+
+Per feedback that round 3's hand-card owner borders (1px) were too subtle
+to actually notice against the board's own 2px placed-card borders.
+`client/index.html`'s `#hand button.owner-a`/`.owner-b` now sets
+`border-width: 3px` explicitly (not just `border-color`, which round 3 set
+alone) — thicker than the board's own 2px so the hand reads as at least as
+prominent as the board it's explaining, not a fainter echo of it. Padding
+reduced by the same amount the border grew (`calc(var(--space-3) - 2px)`),
+same existing trick `.selected` already used for its own border, so the
+card's outer box size is unaffected. `#hand button.selected`'s own
+border-width/padding were updated to match (3px / -2px, was 2px / -1px) —
+every hand card always carries an owner class now (round 3), so leaving
+`.selected` on its old narrower numbers would have visibly thinned the
+border and jittered the card by 1px the moment it's selected. The narrow-
+viewport media query (`max-width: 599px`) needed the same padding
+correction for `.owner-a`/`.owner-b` there too, for the same box-model
+reason at that width's own smaller base padding.
+
+The opponent's hand (card backs) was deliberately left at its existing 2px
+— only "my hand" was named in the request, and the board's placed cards
+(also 2px) are the established reference width for "the opponent's colour
+elsewhere," so thickening only the viewer's own hand creates the intended
+asymmetry (your own cards stand out most) rather than just making
+everything uniformly bolder.
+
+Verified: `pnpm typecheck` and `pnpm test:engine` (124 tests) pass; the
+full black-box suite was run against a freshly isolated server
+(`DISCONNECT_GRACE_MS=50000` in both the server's own env and the shell
+running `pnpm test`, the exact split CI itself needs per the entry above)
+— 25/25 passing, confirming this purely cosmetic CSS change didn't touch
+anything the server/protocol tests exercise. Visual check via headless
+Chromium, two independent browser contexts in a live paired game: each
+player's own hand now shows a clearly bolder border in their own colour;
+the opponent's card backs remain at their existing weight; selecting a
+hand card keeps its border at the same 3px width with no visible jitter
+compared to its unselected neighbours. Zero console errors.
+
+**Not touched, confirmed:** `src/`, `spec/` — no server, engine, or
+protocol change. Production database: untouched.
+
 ## Not yet built
 
 Stage 9's own decision (FIFO matchmaking, concurrent independent matches)
