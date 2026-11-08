@@ -100,20 +100,27 @@
         /* UX pass (2026-11-08): placed-card owner colours, requested as a
            clearer blue-vs-red distinction than the C2 sage/apricot pair this
            replaces on #board only (hand cards, icons, and every other use of
-           --color-primary/--color-accent are untouched). Contrast checked
-           the same way as Stage A's own tokens (WCAG 2.1 relative-luminance
-           formula, not eyeballed): owner-a border #2A5C94 vs --color-surface
-           6.87:1, vs --color-bg 6.34:1; owner-b border #B23A33 vs
-           --color-surface 5.92:1, vs --color-bg 5.47:1 — both clear the
-           3:1 non-text-UI threshold by a wide margin. The *-subtle fills are
-           decorative background tints behind each border/icon, not text, so
-           WCAG 1.4.11 doesn't apply to them the same way; chosen only to
-           stay visually distinct from each other and from the neutral
-           is-playable/unplaced cell background. */
-        --color-owner-a-border: #2a5c94;
-        --color-owner-a-subtle: #dce7f2;
-        --color-owner-b-border: #b23a33;
-        --color-owner-b-subtle: #f7deda;
+           --color-primary/--color-accent are untouched).
+           UX pass (2026-11-08, round 2): re-picked per feedback that the
+           original blue/red clashed with the battlefield's own green
+           (--color-primary) — owner-a shifted from a neutral blue toward a
+           teal (blue+green) and owner-b from a plain red toward a rust
+           (red+green/brown), so both read as part of the same green-leaning
+           palette as the board they sit on, while staying clearly distinct
+           from each other and from the neutral unplaced-cell background.
+           Contrast re-checked the same way as every prior pass (WCAG 2.1
+           relative-luminance, not eyeballed): owner-a border #1F6E74 vs
+           --color-surface 5.93:1, vs --color-bg 5.48:1; owner-b border
+           #96512F vs --color-surface 5.97:1, vs --color-bg 5.52:1 — both
+           still clear the 3:1 non-text-UI threshold by a wide margin. The
+           *-subtle fills are decorative background tints behind each
+           border/icon, not text, so WCAG 1.4.11 doesn't apply to them the
+           same way; mixed at the same 20%-into-white ratio this file's
+           other derived tones use. */
+        --color-owner-a-border: #1f6e74;
+        --color-owner-a-subtle: #d2e2e3;
+        --color-owner-b-border: #96512f;
+        --color-owner-b-subtle: #eadcd5;
 
         --space-1: 4px;
         --space-2: 8px;
@@ -304,6 +311,31 @@
         margin: 0 0 var(--space-4);
         font-weight: 600;
       }
+      /* UX pass (2026-11-08, round 2): series-result modal, shown for every
+         seriesEnded reason (see app.js's showResultDialog). ::backdrop is a
+         real pseudo-element on <dialog>, not a manually-built overlay div. */
+      #result-dialog {
+        max-width: 420px;
+        width: calc(100% - var(--space-8));
+        border: none;
+        border-radius: var(--radius-lg);
+        padding: var(--space-8) var(--space-6) var(--space-6);
+        background: var(--color-surface);
+        box-shadow: 0 12px 40px rgba(0, 0, 0, 0.25);
+      }
+      #result-dialog::backdrop {
+        background: rgba(37, 41, 35, 0.55);
+      }
+      #result-dialog-text {
+        margin: 0 0 var(--space-6);
+        font-size: 1.15rem;
+        font-weight: 600;
+        text-align: center;
+        line-height: 1.4;
+      }
+      #result-dialog .btn--primary {
+        width: 100%;
+      }
       .lobby {
         max-width: 520px;
         margin: var(--space-8) auto;
@@ -431,24 +463,30 @@
          turnDeadline — this client never decides a timeout itself, it only
          counts down to a value the server already computed and sent.
          UX pass (2026-11-08): moved out of .game-topbar's shared text row
-         into its own bordered card directly underneath, per feedback that
-         the countdown was easy to miss sharing a line with the turn
-         indicator — same visual weight class as .stat (hp-ap-row's own
-         bordered cards), not a plain inline <p> anymore. */
+         into its own bordered card.
+         UX pass (2026-11-08, round 2): per feedback that the card still
+         didn't stand out, moved again — next to the "Opponent's hand"
+         heading via .zone-title--with-timer below — and recoloured to the
+         same green as .battlefield's own --color-primary/-strong tokens
+         (the board background), rather than the neutral surface/border
+         pair every other card uses, so it reads as its own distinct accent
+         rather than blending into the HP/AP stat row's visual language.
+         White text on --color-primary-strong checked at 5.52:1 (WCAG 2.1),
+         same formula as this file's other contrast checks. */
       #turn-timer {
         font-weight: 700;
         font-size: 1.05rem;
         font-variant-numeric: tabular-nums;
-        color: var(--color-text-secondary);
-        background: var(--color-surface);
-        border: 1px solid var(--color-border);
+        color: #fff;
+        background: var(--color-primary-strong);
+        border: 1px solid var(--color-primary-strong);
         border-radius: var(--radius-md);
-        padding: var(--space-2) var(--space-4);
+        padding: var(--space-1) var(--space-3);
         text-align: center;
-        margin: 0;
+        margin: 0 0 0 auto;
       }
       #turn-timer.is-low {
-        color: var(--color-error);
+        background: var(--color-error);
         border-color: var(--color-error);
       }
       .zone-title {
@@ -456,6 +494,14 @@
         align-items: baseline;
         gap: var(--space-2);
         margin: 0 0 var(--space-3);
+      }
+      /* UX pass (2026-11-08, round 2): #turn-timer sits inside this
+         heading so it's anchored right next to the opponent's hand — the
+         zone the timer is actually counting down someone's turn against —
+         rather than floating in the shared topbar above. */
+      .zone-title--with-timer {
+        justify-content: space-between;
+        flex-wrap: wrap;
       }
       .zone-hint {
         margin: calc(-1 * var(--space-2)) 0 var(--space-3);
@@ -1015,7 +1061,6 @@
           </div>
           <p id="turn-indicator"></p>
         </div>
-        <p id="turn-timer" class="is-hidden" aria-live="off"></p>
         <div id="hp-ap-row">
           <div class="stat">
             <span class="label">Your HP</span>
@@ -1036,7 +1081,10 @@
         <div id="combat-event-banner" class="is-hidden" aria-live="polite"></div>
 
         <div class="game-zone">
-          <h2 class="zone-title label">Opponent's hand <span>(<span id="opp-hand-count">0</span>)</span></h2>
+          <h2 class="zone-title label zone-title--with-timer">
+            Opponent's hand <span>(<span id="opp-hand-count">0</span>)</span>
+            <span id="turn-timer" class="is-hidden" aria-live="off"></span>
+          </h2>
           <div id="opponent-hand"></div>
         </div>
 
@@ -1082,6 +1130,20 @@
         <pre id="log"></pre>
       </details>
     </main>
+    <!-- UX pass (2026-11-08, round 2): a modal shown for every way a series
+         can end (ordinary 2-win finish, explicit forfeit, disconnect
+         timeout, or mutual abandon) — previously only the lobby's
+         status-line text changed, easy to miss if you weren't looking at
+         it. Native <dialog> so Esc/backdrop-click and focus-trapping come
+         free from the browser; "Join queue" inside it does exactly what the
+         lobby's own button does, since a player closing this is always
+         headed back into the lobby. -->
+    <dialog id="result-dialog">
+      <p id="result-dialog-text"></p>
+      <button id="result-dialog-close" class="btn--primary" autofocus>
+        Join queue<span aria-hidden="true">→</span>
+      </button>
+    </dialog>
     <script src="/app.js"></script>
   </body>
 </html>

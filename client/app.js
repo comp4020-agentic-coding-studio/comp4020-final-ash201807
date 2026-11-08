@@ -46,6 +46,9 @@ const myHpBarEl = document.getElementById("my-hp-bar");
 const oppHpBarEl = document.getElementById("opp-hp-bar");
 const combatEventBanner = document.getElementById("combat-event-banner");
 const effectIconRowEl = document.getElementById("effect-icon-row");
+const resultDialogEl = document.getElementById("result-dialog");
+const resultDialogTextEl = document.getElementById("result-dialog-text");
+const resultDialogCloseBtn = document.getElementById("result-dialog-close");
 
 // Display-only scale for the HP bar. The server doesn't send max HP; this
 // mirrors engine.ts's STARTING_HP and must be updated if that changes. HP
@@ -107,6 +110,22 @@ function setVisible(el, visible) {
 function setConnectionStatus(connected) {
   connectionStatusEl.classList.toggle("is-connected", connected);
   connectionStatusTextEl.textContent = connected ? "Connected" : "Disconnected";
+}
+
+// UX pass (2026-11-08, round 2): shown for every seriesEnded reason — an
+// ordinary 2-win finish, an explicit forfeit, a disconnect-timeout forfeit,
+// or a mutual abandon — not just the disconnect case that prompted this,
+// so the experience doesn't depend on which of the four ways the match
+// happened to end. Native <dialog>.showModal() handles the backdrop, Esc,
+// and focus-trapping; this never decides anything about the match itself,
+// purely a display of a result message the server already decided.
+resultDialogCloseBtn.addEventListener("click", () => {
+  resultDialogEl.close();
+  joinQueueBtn.click();
+});
+function showResultDialog(resultText) {
+  resultDialogTextEl.textContent = resultText;
+  resultDialogEl.showModal();
 }
 
 // A single registry for "state tied to one match that must not survive past
@@ -297,32 +316,37 @@ ws.addEventListener("message", (event) => {
     setVisible(gamePanel, false);
     setVisible(lobbyPanel, true);
     setVisible(joinQueueBtn, true);
-    statusLine.textContent = describeSeriesEnded(message);
+    const resultText = describeSeriesResult(message);
+    statusLine.textContent = `${resultText} Click "Join queue" for a new match.`;
+    showResultDialog(resultText);
   } else if (message.type === "error") {
     log("[server error] " + message.message);
     showError(message.message);
   }
 });
 
-function describeSeriesEnded(message) {
+// UX pass (2026-11-08, round 2): shared by the lobby's status-line text and
+// the result dialog below, so the two never disagree on wording — only the
+// dialog's own "Join queue" button adds the call-to-action, since the
+// status line already has its own visible Join queue button right under it.
+function describeSeriesResult(message) {
   if (message.reason === "opponentDisconnected") {
-    return "Your opponent disconnected and didn't return — you win the match by forfeit. Click \"Join queue\" for a new match.";
+    return "Your opponent disconnected and didn't return — you win the match by forfeit.";
   }
   if (message.reason === "opponentForfeited") {
-    return "Your opponent forfeited the match — you win. Click \"Join queue\" for a new match.";
+    return "Your opponent forfeited the match — you win.";
   }
   if (message.reason === "forfeited") {
-    return "You forfeited the match. Click \"Join queue\" for a new match.";
+    return "You forfeited the match.";
   }
   // "seriesConcluded": either a real 2-win finish, or a mutual mid-series
   // abandon (no winner) — distinguished by seriesWinner being null or set,
   // exactly as src/server/series.ts's own logic decides it server-side.
   const { gamesWon, seriesWinner } = message.series;
   const scoreText = `${gamesWon.A}-${gamesWon.B}`;
-  const resultText = seriesWinner
+  return seriesWinner
     ? `Player ${seriesWinner} wins the match ${scoreText}!`
     : `The match ended with no winner (${scoreText}).`;
-  return `${resultText} Click "Join queue" for a new match.`;
 }
 
 function send(message) {

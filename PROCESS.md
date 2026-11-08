@@ -1482,7 +1482,88 @@ check above confirms the CSS is wired correctly, but nobody has watched a
 full hand actually scroll on screen.
 
 **Not touched, confirmed:** `src/`, `spec/` — no server, engine, or protocol
-change. Production database: untouched. No push, no deploy.
+change. Production database: untouched.
+
+Pushed and deployed (`316fdae`); CI's `check` and `deploy` jobs both passed,
+and the live site was confirmed afterward to actually be serving this pass's
+markup (`effect-icon-row`, `onboarding-diagram`, `color-owner-a-border` all
+present in the fetched HTML).
+
+## UX pass (2026-11-08, round 2) — timer placement/color, owner palette, result dialog
+
+Direct follow-up feedback on round 1 above, same day, after round 1 was
+already live. Three independent requests, all client-only again:
+
+- **Turn timer moved a second time and recoloured.** Round 1 already moved
+  it out of the shared topbar into its own card; feedback was that the card
+  still didn't stand out. Moved again — out of `.game-topbar` entirely and
+  into the "Opponent's hand" zone heading itself (a new
+  `.zone-title--with-timer` modifier, `justify-content: space-between`, the
+  timer pushed to the far right via `margin-left: auto`) — and recoloured
+  from the neutral surface/border pair every other card uses to the same
+  green `--color-primary-strong` the battlefield itself uses, white text,
+  checked at 5.52:1 (WCAG 2.1, same formula as every other contrast check in
+  this file). `#turn-timer.is-low` keeps the existing urgent-colour swap,
+  now `--color-error` as a fill instead of just a border/text colour. The
+  element had to move from a `<p>` to a `<span>` to stay inside the `<h2>`
+  heading as valid phrasing content — `app.js` only ever selects it by
+  `#turn-timer` id, so this needed no script change.
+- **Board owner colors re-picked** for harmony with the battlefield's own
+  green, not just contrast. Round 1's plain blue (`#2a5c94`) and red
+  (`#b23a33`) were picked for contrast alone and clashed against
+  `--color-primary`'s green board background per this feedback. Re-picked
+  toward the same green family: owner-a is now a teal (blue+green,
+  `#1f6e74`), owner-b a rust (red+green/brown, `#96512f`) — both still
+  independently contrast-checked (WCAG 2.1): owner-a vs `--color-surface`
+  5.93:1, vs `--color-bg` 5.48:1; owner-b vs `--color-surface` 5.97:1, vs
+  `--color-bg` 5.52:1, both still clearing the 3:1 non-text-UI threshold.
+  The `-subtle` fills were re-derived the same way this file's other
+  `color-mix`-derived tones are built (20% of the border colour mixed into
+  white), rather than hand-picked a second time. The Combo guide's two SVG
+  diagrams needed no edit at all — they already reference the owner-color
+  custom properties rather than hardcoded hex, so they picked up the new
+  palette automatically, confirmed by screenshot rather than assumed.
+- **A result dialog, for every way a series can end**, not just the
+  disconnect-timeout case the request named — closed with the project owner
+  as covering the ordinary 2-win finish, an explicit forfeit (either side),
+  the existing 30s disconnect-grace forfeit, and a mutual mid-series
+  abandon alike, so the experience doesn't depend on which of the four a
+  given match happens to end by. A native `<dialog>` (`#result-dialog`,
+  `client/index.html`) rather than a hand-built overlay `div` — `::backdrop`
+  and `showModal()`/`.close()` handle the dimmed background, Esc-to-dismiss,
+  and focus-trapping for free. `describeSeriesEnded` (`client/app.js`) was
+  split into `describeSeriesResult` (just the outcome sentence) so the
+  lobby's status-line text and the new dialog share exactly one source of
+  truth for wording rather than risking the two drifting apart; the dialog
+  adds its own "Join queue" button (wired to the same `send({type:
+  "joinQueue"})` the lobby's own button already sends) rather than
+  restating "click Join queue" as text a second time.
+
+Verified by running the result: `pnpm typecheck` and `pnpm test:engine`
+(124 tests, unchanged) pass. The black-box suite was run once, this time
+alone from the start (round 1's own lesson about not sharing the live
+server's matchmaking queue with a manual check applied from the outset) —
+25/25 pass. Visual check via headless Chromium, two independent browser
+contexts: the timer's new position/colour confirmed in a live paired game;
+a placed owner-a card confirmed showing the new teal, not the round-1 blue;
+the Combo guide's diagrams confirmed showing the new palette without any
+diagram-specific edit; an explicit `forfeitSeries` from one side confirmed
+showing the correctly-worded dialog to *both* players (the forfeiter's own
+"You forfeited the match" and the survivor's "Your opponent forfeited the
+match — you win."); clicking the dialog's own "Join queue" button confirmed
+closing the dialog and actually re-queuing (status line read "In queue —
+waiting for an opponent..." immediately after). Zero console errors across
+every check.
+
+**Not independently re-verified this round** (carried over from round 1,
+unaffected by anything changed here): the 5-card hand's horizontal-scroll
+behaviour under a narrow viewport during real live play.
+
+**Not touched, confirmed:** `src/`, `spec/` — no server, engine, or protocol
+change; the disconnect grace period itself (`DISCONNECT_GRACE_MS`, still
+30s in production) is unchanged — this round only changes what the
+survivor sees once that existing timeout has already fired. Production
+database: untouched.
 
 ## Not yet built
 
