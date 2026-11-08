@@ -1,4 +1,4 @@
-# Card Board Game
+# Elemental Combo
 
 ## What this is
 
