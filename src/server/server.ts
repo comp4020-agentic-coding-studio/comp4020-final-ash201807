@@ -127,6 +127,22 @@ export function createServer(persistence: Persistence, options: ServerOptions = 
   // timer could leak from.
   const turnTimers = new Map<string, NodeJS.Timeout>();
 
+  // UX fix (2026-11-08): live setTimeout handles for a SEATED session's own
+  // disconnect grace period, keyed by sessionId — same "Live" shape as
+  // turnTimers above, fixing the gap it didn't cover. Before this, grace-
+  // period expiry was only ever checked lazily inside reapAndSettleSeries,
+  // itself only called from resolveSession (a new WebSocket connecting) or
+  // a joinQueue message — so a still-connected survivor whose opponent left
+  // and never came back, with nobody else hitting the server in the
+  // meantime, could sit on a fully-expired grace period forever with no
+  // seriesEnded ever sent, confirmed live via a real two-browser repro
+  // before this fix. This timer's only job is to call the SAME
+  // reapAndSettleSeries the lazy paths already use, at the moment the grace
+  // period actually elapses — it introduces no new settlement logic, only a
+  // trigger the old design was missing for the case where nothing else
+  // would ever supply one.
+  const disconnectReapTimers = new Map<string, NodeJS.Timeout>();
+
   // Seated sockets only — keyed to the session id, not a cached
   // PlayerId/seriesId: resolving both fresh from appState.sessions on every
   // use (rather than caching them here at connection time) means there's
@@ -318,6 +334,36 @@ export function createServer(persistence: Persistence, options: ServerOptions = 
     if (recoveredAny) persistence.save(appState);
   }
 
+  // UX fix (2026-11-08): same recovery shape as recoverTurnTimers above, for
+  // the new disconnect-reap timers — a session already mid-grace-period
+  // when this process last stopped has a persisted disconnectedAt but, on
+  // this fresh process, no live setTimeout counting down the rest of it.
+  // Without this, such a session would only ever get reaped by the old
+  // lazy path (some later unrelated connection or joinQueue) rather than at
+  // its own correct moment — exactly the gap this whole fix closes,
+  // reintroduced specifically across a restart if left unhandled here.
+  // Already-elapsed sessions are reaped via the SAME reapAndSettleSeries
+  // every other path uses (one call handles every session reapExpiredSessions
+  // would drop, not one call per session), never a shortcut that skips its
+  // settlement logic; a still-pending one gets a live timer for exactly its
+  // own remaining time, not a fresh full disconnectGraceMs.
+  function recoverDisconnectReaps(): void {
+    let anyElapsed = false;
+    for (const entry of Object.values(appState.sessions)) {
+      if (!entry || entry.disconnectedAt === null) continue;
+      const remaining = entry.disconnectedAt + disconnectGraceMs - Date.now();
+      if (remaining <= 0) {
+        anyElapsed = true;
+      }
+    }
+    if (anyElapsed) reapAndSettleSeries(); // one pass covers every already-elapsed session at once
+    for (const [sessionId, entry] of Object.entries(appState.sessions)) {
+      if (!entry || entry.disconnectedAt === null) continue;
+      const remaining = entry.disconnectedAt + disconnectGraceMs - Date.now();
+      if (remaining > 0) scheduleDisconnectReap(sessionId, remaining);
+    }
+  }
+
   // Stage 6: the one "a series has ended, tell whoever's owed a message,
   // release every member's SessionEntry, remove the series itself" sequence,
   // shared by all three ways a series can end (disconnect-forfeit below,
@@ -348,6 +394,14 @@ export function createServer(persistence: Persistence, options: ServerOptions = 
         }
       }
       appState.sessions = releaseSession(appState.sessions, memberSessionId);
+      // UX fix (2026-11-08): same reasoning as stopTurnTimer above — a
+      // released session has nothing left for a pending disconnect-reap
+      // timer to act on (e.g. an explicit forfeitSeries settling the series
+      // out from under a still-disconnected opponent's own live grace-period
+      // timer). Harmless either way (reapAndSettleSeries is a no-op once the
+      // sessionId is gone from appState.sessions), but stopping it here
+      // avoids an unnecessary wake-up later rather than relying on that.
+      stopDisconnectReap(memberSessionId);
     }
     delete appState.seriesList[seriesId];
   }
@@ -362,6 +416,39 @@ export function createServer(persistence: Persistence, options: ServerOptions = 
     if (!parseSessionId(req.headers.cookie)) {
       res.setHeader("Set-Cookie", sessionCookieHeader(newSessionId()));
     }
+  }
+
+  // UX fix (2026-11-08): stops a disconnect-reap timer if one is pending for
+  // this session — called on reconnect (its grace period no longer applies)
+  // and right before scheduling a fresh one (so a session that disconnects,
+  // reconnects, then disconnects again never ends up with two live handles
+  // racing each other), same invariant armTurnTimer/stopTurnTimer already
+  // keep for turnTimers.
+  function stopDisconnectReap(sessionId: string): void {
+    const handle = disconnectReapTimers.get(sessionId);
+    if (handle) {
+      clearTimeout(handle);
+      disconnectReapTimers.delete(sessionId);
+    }
+  }
+
+  // UX fix (2026-11-08): schedules exactly one live timer for this session's
+  // own disconnect grace period, firing reapAndSettleSeries at the moment it
+  // elapses rather than leaving expiry to be noticed only if some unrelated
+  // request happens to arrive afterward. reapAndSettleSeries is still the
+  // one function that actually decides anything — this only guarantees it
+  // gets called when the grace period for THIS session actually runs out,
+  // closing the gap a purely lazy design left open (see disconnectReapTimers'
+  // own comment for the live repro this fixes). `delayMs` is the REMAINING
+  // time, not always a fresh disconnectGraceMs — see recoverDisconnectReaps
+  // below for why that distinction matters across a process restart.
+  function scheduleDisconnectReap(sessionId: string, delayMs: number): void {
+    stopDisconnectReap(sessionId);
+    const handle = setTimeout(() => {
+      disconnectReapTimers.delete(sessionId);
+      reapAndSettleSeries();
+    }, delayMs);
+    disconnectReapTimers.set(sessionId, handle);
   }
 
   // Reaps every session whose grace period has fully elapsed (a plain
@@ -502,6 +589,12 @@ export function createServer(persistence: Persistence, options: ServerOptions = 
         appState.sessions = { ...appState.sessions, [sessionId]: { ...existing, disconnectedAt: null } };
         persistence.save(appState);
         logEvent({ event: "session_reconnected", displayId: displayIdFor(sessionId), seriesId: existing.seriesId ?? undefined });
+        // UX fix (2026-11-08): this session is no longer disconnected, so
+        // the live reap timer scheduled for its old grace period must not
+        // fire later and reap a session that's actually fine again — same
+        // "reconnect clears the pending expiry" intent reapExpiredSessions
+        // itself already has via disconnectedAt being reset above.
+        stopDisconnectReap(sessionId);
       }
       return { sessionId, status: "seated", player: existing.player };
     }
@@ -832,6 +925,13 @@ export function createServer(persistence: Persistence, options: ServerOptions = 
             displayId,
             seriesId: appState.sessions[sessionId]?.seriesId ?? undefined,
           });
+          // UX fix (2026-11-08): guarantees reapAndSettleSeries actually
+          // runs once this grace period elapses, rather than only if some
+          // unrelated connection or joinQueue happens to arrive afterward —
+          // see disconnectReapTimers' own comment for the live repro this
+          // closes. A full fresh disconnectGraceMs, same as markDisconnected
+          // just recorded the start of above.
+          scheduleDisconnectReap(sessionId, disconnectGraceMs);
         }
       });
     });
@@ -845,6 +945,9 @@ export function createServer(persistence: Persistence, options: ServerOptions = 
   // comment for exactly-once-timeout semantics on an already-elapsed
   // deadline.
   recoverTurnTimers();
+  // UX fix (2026-11-08): same restart-recovery need as recoverTurnTimers
+  // immediately above, for the new disconnect-reap timers.
+  recoverDisconnectReaps();
 
   return httpServer;
 }

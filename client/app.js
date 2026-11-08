@@ -404,11 +404,19 @@ function renderTurnTimer(state, series) {
   const tick = () => {
     const remainingMs = series.turnDeadline - Date.now();
     const remainingSeconds = Math.max(0, Math.ceil(remainingMs / 1000));
+    const isMyTurn = state.currentPlayer === myPlayer;
     setVisible(turnTimerEl, true);
-    turnTimerEl.textContent =
-      state.currentPlayer === myPlayer
-        ? `${remainingSeconds}s left to act`
-        : `Opponent has ${remainingSeconds}s left`;
+    turnTimerEl.textContent = isMyTurn
+      ? `${remainingSeconds}s left to act`
+      : `Opponent has ${remainingSeconds}s left`;
+    // UX pass (2026-11-08, round 3): whose turn it is now changes the
+    // timer's own colour, not just its text — green (the round-2 colour)
+    // only while it's actually your turn to act; the opposite colour
+    // (white/black) while you're waiting on the opponent, so a glance tells
+    // you who the clock is actually running against without reading the
+    // words. is-low's red still overrides either colour once the turn is
+    // genuinely urgent.
+    turnTimerEl.classList.toggle("is-my-turn", isMyTurn);
     turnTimerEl.classList.toggle("is-low", remainingSeconds <= 10);
     if (remainingMs <= 0) clearInterval(turnTimerInterval);
   };
@@ -545,16 +553,30 @@ function showDamagePop(anchorEl, amount) {
   setTimeout(remove, 1500); // fallback for prefers-reduced-motion (no animationend fires)
 }
 
+// UX pass (2026-11-08, round 3): both hand zones now border their cards in
+// the SAME owner colour the board already uses for a placed card of that
+// player (#board's own owner-a/owner-b classes and --color-owner-*-border/
+// -subtle tokens) — opponent.hand/me.hand carry no `owner` field themselves
+// (a card isn't "owned" until it's placed), so this reads myPlayer instead,
+// the one thing that actually determines which of the two colours belongs
+// to which hand for THIS viewer. Every hand always shows exactly one
+// consistent colour throughout a whole match: myPlayer never changes after
+// assignment, so there's nothing to keep in sync mid-game.
+function ownerClassFor(player) {
+  return player === "A" ? "owner-a" : "owner-b";
+}
+
 function renderOpponentHand(opponent) {
   oppHandCountEl.textContent = String(opponent.hand.length);
   opponentHandEl.innerHTML = "";
+  const opponentOwnerClass = ownerClassFor(myPlayer === "A" ? "B" : "A");
   // `opponent.hand.length` is the only thing read from the real hand here —
   // the loop body never looks at what's actually in it, so every back gets
   // the exact same fixed pattern regardless of hand contents (see
   // OPPONENT_CARD_BACK_SVG's own comment).
   for (let i = 0; i < opponent.hand.length; i++) {
     const back = document.createElement("span");
-    back.className = "card-back";
+    back.className = `card-back ${opponentOwnerClass}`;
     back.innerHTML = OPPONENT_CARD_BACK_SVG;
     opponentHandEl.appendChild(back);
   }
@@ -564,6 +586,7 @@ function renderHand(state, me) {
   const myTurn = state.status === "active" && state.currentPlayer === myPlayer;
   myHandCountEl.textContent = String(me.hand.length);
   handEl.innerHTML = "";
+  const myOwnerClass = ownerClassFor(myPlayer);
   me.hand.forEach((card, index) => {
     const button = document.createElement("button");
     // B2: icon is purely decorative (aria-hidden, see CARD_TYPE_ICONS'
@@ -573,6 +596,7 @@ function renderHand(state, me) {
     // unchanged and still what's read on click below.
     button.innerHTML = CARD_TYPE_ICONS[card];
     button.appendChild(document.createTextNode(card));
+    button.classList.add(myOwnerClass);
     button.classList.toggle("selected", index === selectedHandIndex);
     button.setAttribute("aria-pressed", String(index === selectedHandIndex));
     button.disabled = !myTurn;

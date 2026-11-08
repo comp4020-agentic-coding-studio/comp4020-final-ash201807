@@ -385,6 +385,23 @@
       .onboarding-body li {
         margin-bottom: var(--space-1);
       }
+      /* UX pass (2026-11-08, round 3): inline colour swatches next to the
+         hand-border explanation, reusing the exact --color-owner-*-border
+         tokens #hand/#opponent-hand/#board all already render with. */
+      .owner-color-swatch {
+        display: inline-block;
+        width: 12px;
+        height: 12px;
+        border-radius: 3px;
+        margin: 0 2px;
+        vertical-align: -1px;
+      }
+      .owner-color-swatch.owner-a {
+        background: var(--color-owner-a-border);
+      }
+      .owner-color-swatch.owner-b {
+        background: var(--color-owner-b-border);
+      }
       /* UX pass (2026-11-08): "How to play" diagrams, requested on top of
          the existing text-only panels. Small inline SVGs, same
          shape-rendering: crispEdges / aria-hidden pattern as this file's
@@ -466,26 +483,35 @@
          into its own bordered card.
          UX pass (2026-11-08, round 2): per feedback that the card still
          didn't stand out, moved again — next to the "Opponent's hand"
-         heading via .zone-title--with-timer below — and recoloured to the
-         same green as .battlefield's own --color-primary/-strong tokens
-         (the board background), rather than the neutral surface/border
-         pair every other card uses, so it reads as its own distinct accent
-         rather than blending into the HP/AP stat row's visual language.
-         White text on --color-primary-strong checked at 5.52:1 (WCAG 2.1),
-         same formula as this file's other contrast checks. */
+         heading via .zone-title--with-timer below.
+         UX pass (2026-11-08, round 3): colour now also encodes WHOSE turn
+         it is, not just urgency — white background/black text (the base
+         style below) while waiting on the opponent, switching to round 2's
+         green fill only once app.js's own is-my-turn class says it's
+         actually your turn to act. is-low's red still overrides either, a
+         turn genuinely about to time out regardless of whose it is. White
+         bg/black text is obviously high-contrast; green bg/white text
+         re-checked the same way as every other pass in this file (WCAG
+         2.1): white vs --color-primary-strong 5.52:1. */
       #turn-timer {
         font-weight: 700;
         font-size: 1.05rem;
         font-variant-numeric: tabular-nums;
-        color: #fff;
-        background: var(--color-primary-strong);
-        border: 1px solid var(--color-primary-strong);
+        color: var(--color-text);
+        background: var(--color-surface);
+        border: 1px solid var(--color-text);
         border-radius: var(--radius-md);
         padding: var(--space-1) var(--space-3);
         text-align: center;
         margin: 0 0 0 auto;
       }
+      #turn-timer.is-my-turn {
+        color: #fff;
+        background: var(--color-primary-strong);
+        border-color: var(--color-primary-strong);
+      }
       #turn-timer.is-low {
+        color: #fff;
         background: var(--color-error);
         border-color: var(--color-error);
       }
@@ -723,7 +749,12 @@
       /* B1 card back: fixed pattern from app.js's OPPONENT_CARD_BACK_SVG,
          never changed by card contents. */
       /* C4: portrait back to match the hand cards' proportions (was 60x36
-         landscape). Pattern is a fixed constant; only the count varies. */
+         landscape). Pattern is a fixed constant; only the count varies.
+         UX pass (2026-11-08, round 3): border now reuses the SAME
+         --color-owner-*-border token the board already colours a placed
+         card with, via app.js's own ownerClassFor — so "this is player B's
+         card" reads as the same colour everywhere it appears, board or
+         hand, not a third, unrelated colour invented just for the hand. */
       #opponent-hand .card-back {
         display: inline-block;
         box-sizing: border-box;
@@ -731,9 +762,15 @@
         height: 76px;
         padding: 6px;
         background: var(--color-surface);
-        border: 1px solid var(--color-primary);
+        border: 2px solid var(--color-primary);
         border-radius: var(--radius-sm);
         overflow: hidden;
+      }
+      #opponent-hand .card-back.owner-a {
+        border-color: var(--color-owner-a-border);
+      }
+      #opponent-hand .card-back.owner-b {
+        border-color: var(--color-owner-b-border);
       }
       #opponent-hand .card-back svg {
         display: block;
@@ -759,6 +796,13 @@
         padding-top: var(--space-1);
         padding-bottom: var(--space-2); /* room for the scrollbar, never overlapping a card */
       }
+      /* UX pass (2026-11-08, round 3): border colour is owner-tied (below)
+         rather than a plain neutral border, so hover/selected deliberately
+         leave border-color alone now — only border WIDTH and background
+         change for those states, so the owner colour stays visible and
+         consistent through every interaction state, the same way the
+         board's own owner-a/owner-b cards never lose their colour on
+         hover/selection either. */
       #hand button {
         flex-shrink: 0;
         width: 104px;
@@ -779,6 +823,12 @@
           border-color 0.15s ease,
           background-color 0.15s ease;
       }
+      #hand button.owner-a {
+        border-color: var(--color-owner-a-border);
+      }
+      #hand button.owner-b {
+        border-color: var(--color-owner-b-border);
+      }
       #hand button svg {
         display: block;
         box-sizing: border-box;
@@ -789,11 +839,10 @@
         border-radius: var(--radius-sm);
       }
       #hand button:hover:not(:disabled) {
-        border-color: var(--color-primary-strong);
-        background: var(--color-surface);
+        background: var(--color-primary-subtle);
       }
       #hand button.selected {
-        border: 2px solid var(--color-primary-strong);
+        border-width: 2px;
         background: var(--color-primary-subtle);
         transform: translateY(-4px);
         padding: calc(var(--space-3) - 1px);
@@ -973,6 +1022,28 @@
               3x3 fills up. You have 45 seconds to act on your turn — if time
               runs out, your turn ends automatically and play passes to your
               opponent.
+            </p>
+            <!-- UX pass (2026-11-08, round 3): explains the new owner-colour
+                 hand borders (app.js's ownerClassFor) in words, plus two
+                 small swatches reusing the SAME --color-owner-*-border
+                 tokens the board/hand actually render with — never a
+                 hardcoded colour name here that could drift from the real
+                 ones if those tokens are ever re-picked again. Deliberately
+                 NOT written as "yours is teal, theirs is rust": which of
+                 the two colours is actually "yours" depends on whether you
+                 land on Player A or B for this particular match (randomly,
+                 via FIFO pairing) — this text is shown before that's even
+                 assigned, in the lobby's own onboarding panel, so it
+                 describes the RULE (own hand border matches own placed
+                 cards) rather than naming a specific colour as "yours". -->
+            <p class="owner-color-note">
+              Your own hand is always bordered in whichever of these two
+              colours your placed cards show on the board
+              (<span class="owner-color-swatch owner-a" aria-hidden="true"></span>
+              or
+              <span class="owner-color-swatch owner-b" aria-hidden="true"></span>);
+              your opponent's hand (shown as card backs) is bordered in the
+              other one.
             </p>
             <p>Reduce your opponent to 0 HP first to win the game.</p>
           </div>

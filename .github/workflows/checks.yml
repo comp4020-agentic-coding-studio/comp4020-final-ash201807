@@ -35,20 +35,22 @@ jobs:
         # volume; the spec runs against it
         run: |
           docker build -t app .
-          # 1s instead of the real 30s default (src/server/index.ts) so
-          # spec/game.test.ts's disconnect-expiry checks don't burn CI time
-          # actually waiting out the production grace period. TURN_DURATION_MS
-          # deliberately stays at its real 45s default here, unlike
-          # DISCONNECT_GRACE_MS above: the shared a/b pairing several earlier
-          # tests reuse (e.g. the reconnect check, which compares
-          # currentPlayer before/after a short wait) runs in low hundreds of
-          # milliseconds total, nowhere near even a shortened few-second
-          # timer, so shortening it would only risk an unrelated turn
-          # auto-ending mid-test and flipping currentPlayer out from under an
-          # assertion that isn't testing the timer at all. The dedicated
-          # turn-timeout tests below pay the real 45s wait each, which still
-          # fits comfortably inside this job's 20-minute timeout.
-          docker run -d --init --name app -p 8080:8080 -e PORT=8080 -e DISCONNECT_GRACE_MS=1000 --tmpfs /data app
+          # Both shortened from their real production defaults (30s/45s,
+          # src/server/index.ts) so spec/game.test.ts's disconnect-expiry and
+          # turn-timeout checks don't burn CI time waiting out the real
+          # values. DISCONNECT_GRACE_MS > TURN_DURATION_MS here is the
+          # OPPOSITE order from production's own defaults (30s grace < 45s
+          # turn) — deliberately: a UX fix (2026-11-08, see PROCESS.md) made
+          # the disconnect grace period a live, self-firing timer rather
+          # than only checked lazily on the next unrelated request, so
+          # whichever of the two deadlines is numerically SHORTER now fires
+          # first, for real. The "keeps the timer running... while
+          # disconnected" test specifically needs the TURN deadline to be
+          # the one that fires, to prove it isn't paused by the disconnect —
+          # which requires grace to be the LONGER of the two in whatever
+          # environment that test runs against, this one included, even
+          # though that's backwards from the live app's own ratio.
+          docker run -d --init --name app -p 8080:8080 -e PORT=8080 -e DISCONNECT_GRACE_MS=5000 -e TURN_DURATION_MS=2000 --tmpfs /data app
       - name: Run the spec
         run: pnpm check
         env:

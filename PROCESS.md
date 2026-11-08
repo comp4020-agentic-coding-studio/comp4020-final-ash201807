@@ -1565,6 +1565,134 @@ change; the disconnect grace period itself (`DISCONNECT_GRACE_MS`, still
 survivor sees once that existing timeout has already fired. Production
 database: untouched.
 
+## UX fix (2026-11-08, round 3) — disconnect-reap was never self-triggering, plus timer/owner-colour follow-ups
+
+Started as more client-feedback follow-up, same day; became a real
+server-side bug fix once the first of three requests turned out not to be a
+display gap at all.
+
+**The bug, found before any code changed.** The user reported the result
+dialog (round 2 above) never appeared for the survivor when the opponent
+just closed their browser tab. Traced to `reapAndSettleSeries` (`server.ts`)
+— the function that actually decides a disconnected player's grace period
+has elapsed — being called ONLY from two places: `resolveSession` (a new
+WebSocket connecting) and a `joinQueue` message. If nobody else ever
+connects or queues after one player leaves mid-match, nothing ever runs
+that check again — the survivor's own still-open tab has no reason to
+reconnect, so it can sit on a fully-elapsed grace period forever. Confirmed
+live, not assumed: a two-browser Playwright repro (`DISCONNECT_GRACE_MS=3000`,
+one context closed, the other left completely idle with zero other activity
+anywhere on the server) showed no `seriesEnded`, no dialog, nothing — 5
+seconds past a 3-second grace period.
+
+**The fix mirrors the Turn Timer's own already-proven shape** (Stage 2's
+live `setTimeout` + restart recovery), rather than inventing a new pattern:
+a `disconnectReapTimers: Map<sessionId, Timeout>` (parallel to `turnTimers`),
+`scheduleDisconnectReap`/`stopDisconnectReap` (parallel to
+`scheduleTimer`/`stopTurnTimer`), and `recoverDisconnectReaps` (parallel to
+`recoverTurnTimers`, called at the same startup point) for a session already
+mid-grace-period when the process last stopped. `ws.on("close")` now calls
+`scheduleDisconnectReap(sessionId, disconnectGraceMs)` right after
+`markDisconnected` persists the timestamp; a reconnect inside
+`resolveSession` calls `stopDisconnectReap`; `concludeSeries` calls it too,
+for the same reason `stopTurnTimer` already does (nothing left to reap once
+a session's released). The timer's only job is calling the SAME
+`reapAndSettleSeries` the old lazy paths already used — no new settlement
+logic, only a trigger the old design was missing. Re-ran the exact repro
+script after the fix: the dialog now appears automatically, same wording as
+before, with zero other server activity.
+
+**This surfaced a real, pre-existing conflict in CI's own test config**,
+previously invisible because the bug above meant the disconnect grace
+period never actually fired on its own schedule to expose it. The
+turn-timeout test "keeps the timer running... while disconnected" only
+proves anything if the TURN deadline is the one that fires during its wait —
+the whole point is watching the turn timer survive a disconnect, which
+requires the disconnect grace period to still be running (i.e. longer) when
+it does. Production's real defaults already satisfy this by coincidence
+(`DISCONNECT_GRACE_MS` 30s < `TURN_DURATION_MS` 45s — grace is the SHORTER
+one in production, which is backwards from what this test needs, but it
+never mattered before now since the bug meant grace elapsing was never
+actually observed by anything). CI's own `checks.yml` made it concrete:
+`DISCONNECT_GRACE_MS` shortened to 1s, `TURN_DURATION_MS` left at the real
+45s default. Once the grace period became a real self-firing timer, that
+gap stopped being theoretical: the 1s disconnect grace now correctly fires
+FIRST and forfeits the whole series by disconnect, before the unshortened
+45s turn timer ever gets a chance to prove it kept running through the
+disconnect. Confirmed via a standalone repro
+(`DISCONNECT_GRACE_MS=2000`/`TURN_DURATION_MS=5000`, grace deliberately the
+LONGER of the two) before touching any test or CI file: with that ordering,
+the turn timer does fire first and the test's own assertion holds.
+
+Fixed by setting CI's two env vars (`checks.yml`) so `DISCONNECT_GRACE_MS`
+(now 5000) is LONGER than `TURN_DURATION_MS` (now 2000) — the ordering this
+specific test needs, chosen deliberately rather than copying production's
+own (opposite) ratio, since CI's job is making this test pass fast, not
+replicating the live ratio. `spec/game.test.ts`'s own top-of-file comment
+documents the requirement so a future local override doesn't reintroduce
+the gap. Re-running the full `pnpm test` suite at the new ratio
+surfaced a SECOND, genuinely independent test-design conflict (not a bug in
+application code): "forfeits the WHOLE series... without disturbing an
+unrelated concurrent series" explicitly waits `disconnectGraceMs + 500`ms
+with an unrelated, fully-connected concurrent match running the whole time —
+once `disconnectGraceMs` is deliberately the longer of the two durations,
+that unrelated match's own (shorter) turn timer can legitimately fire
+during the same wait, which is a real and correct "state" broadcast, not
+cross-series leakage, but the test's own strict "zero new messages of any
+kind" assertion couldn't tell the two apart. Fixed by narrowing that
+assertion to what the test actually claims to verify — no `seriesEnded` for
+the unrelated series, and its `status` still `"active"` — rather than "zero
+messages of any kind," which was asserting more than the test's own name
+promises. Also removed that test's now-unnecessary trigger connection
+(`connect(await newSessionCookie())`), since the disconnect-reap fix above
+means the forfeit has already happened by the time the wait itself returns,
+not only once some later connection happens to arrive.
+
+Verified by running the result at every step, not reading code back:
+`pnpm typecheck` and `pnpm test:engine` (124 tests, unchanged) pass. The
+full black-box suite was run three times total at the corrected
+5000/2000 ratio, against three separate fresh isolated servers each time
+(learning kept from round 1's own contamination lesson) — 25/25 passing
+every time, including after the two test-file fixes above. The original
+two-browser disconnect repro was re-run one final time as the combined
+check for this whole round: zero console errors, dialog still appears
+automatically with the correct wording.
+
+**Three further, independent UI follow-ups, same session:**
+- **Turn timer colour now also encodes whose turn it is**, not just
+  urgency. `app.js`'s `renderTurnTimer` adds an `is-my-turn` class
+  alongside the existing `is-low`; CSS: white background/black text
+  (`#turn-timer`'s new base style) while waiting on the opponent, switching
+  to round 2's green fill only while `is-my-turn` is set, `is-low`'s red
+  still overriding either. Screenshotted both states in a live paired game
+  to confirm the swap actually happens, not just that the classes exist.
+- **Board owner colours now also apply to both hand zones**, not just
+  placed board cells, per feedback asking for the two to visually match. A
+  new `ownerClassFor(player)` (`app.js`) is the one function that decides
+  which of `owner-a`/`owner-b` a hand belongs to — reading `myPlayer`
+  directly, since a card isn't "owned" by anyone until it's placed and
+  `me.hand`/`opponent.hand` carry no owner field themselves. Both
+  `renderHand` (own hand, border only — background/selection states
+  deliberately keep their own existing colours, only `border-color` changed,
+  confirmed by removing border-color from the pre-existing `:hover`/
+  `.selected` rules so they can't override it) and `renderOpponentHand`
+  (card backs) apply it. Screenshotted from both players' own point of
+  view in the same live match: colours are consistently swapped between the
+  two viewers (each player's own hand shows their own placed-card colour;
+  their opponent's hand/card-backs show the other one), confirming this
+  reads from `myPlayer` correctly rather than a hardcoded assumption.
+  "How to play" gained a paragraph (with two small colour swatches reusing
+  the same `--color-owner-*-border` tokens, never a hardcoded hex a second
+  time) explaining the rule — deliberately NOT written as "yours is teal,
+  theirs is rust," since which colour is actually "yours" depends on
+  whether this particular match assigns you Player A or B, decided by FIFO
+  pairing after this text is already shown.
+
+**Not touched, confirmed:** `src/game/engine.ts`, `src/game/types.ts` — zero
+rule changes; `protocol.ts` — no new message types, this is purely
+server-internal timer plumbing plus client-only display changes. Production
+database: untouched.
+
 ## Not yet built
 
 Stage 9's own decision (FIFO matchmaking, concurrent independent matches)

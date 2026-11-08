@@ -45,17 +45,32 @@ import WebSocket from "ws";
 //
 // The disconnect-expiry tests actually wait out the server's configured
 // DISCONNECT_GRACE_MS (src/server/index.ts) — this file reads the same env
-// var so it knows how long to wait, defaulting to the real 30s if unset. CI
-// sets it to 1s (.github/workflows/checks.yml). Running locally against the
-// real default makes this file take significantly longer; start your dev
-// server with DISCONNECT_GRACE_MS=1000 (and export it before `pnpm check`
-// too) for a fast local run.
+// var so it knows how long to wait, defaulting to the real 30s if unset.
+// Running locally against the real default makes this file take
+// significantly longer; see the TURN_DURATION_MS comment immediately below
+// before shortening it for a fast local run — the two can't be shortened
+// independently of each other.
 const disconnectGraceMs = Number(process.env.DISCONNECT_GRACE_MS ?? 30_000);
 // Stage 2 (Turn Timer): same override pattern as disconnectGraceMs above,
 // for the same reason — the turn-timeout tests actually wait out the
 // server's own configured TURN_DURATION_MS (src/server/index.ts) rather
-// than mocking time. Set this to a few seconds locally (and export it
-// before `pnpm check`) for a fast run; CI sets it in checks.yml.
+// than mocking time.
+//
+// UX fix (2026-11-08): DISCONNECT_GRACE_MS must stay LONGER than
+// TURN_DURATION_MS whenever both are shortened for a fast run — the
+// OPPOSITE ratio from the real production defaults (30s grace < 45s turn).
+// Before this fix, the disconnect grace period was only ever checked
+// lazily on an unrelated later request, so a shorter grace period never
+// actually fired on its own before a turn-timeout test's own wait
+// finished; now it's a live, self-firing timer like this one always was,
+// so whichever deadline is numerically SHORTER really does win the race.
+// "keeps the timer running... while disconnected" below specifically needs
+// the TURN deadline to be the one that fires (that's the whole test), which
+// means grace must be the LONGER of the two here, even though that's
+// backwards from the live app's own ratio. Get this backwards locally and
+// that test settles the whole series by disconnect-forfeit before the turn
+// timer ever gets a chance to prove anything (CI's own checks.yml sets
+// 5000/2000; keep local overrides in the same ratio).
 const turnDurationMs = Number(process.env.TURN_DURATION_MS ?? 45_000);
 const baseUrl = inject("baseUrl");
 const wsUrl = baseUrl.replace(/^http/, "ws") + "/ws";
@@ -457,22 +472,30 @@ it("forfeits the WHOLE series to the survivor once the disconnected opponent's g
   departing.ws.close();
   await wait(disconnectGraceMs + 500);
 
-  // Reaping is only checked inside resolveSession, which runs on a
-  // WebSocket upgrade — a plain HTTP GET never reaches it. Any new
-  // connection attempt is a fine trigger (same pattern every prior
-  // disconnect-expiry test in this file relies on, each of those via
-  // connectAndJoinQueue's own WebSocket connect).
+  // UX fix (2026-11-08): the disconnect grace period now fires via its own
+  // live timer (see PROCESS.md) rather than only being checked lazily
+  // inside resolveSession on the next WebSocket upgrade — so, unlike every
+  // other disconnect-expiry test in this file, no trigger connection is
+  // needed here anymore for the forfeit itself to have already happened by
+  // the time the wait above returns. A plain wait is enough.
   const unrelatedACountBefore = unrelated.a.messages.length;
   const unrelatedBCountBefore = unrelated.b.messages.length;
-  const trigger = await connect(await newSessionCookie());
-  await wait(200);
 
   expect(survivor.messages).toContainEqual({ type: "seriesEnded", reason: "opponentDisconnected" });
 
   // The unrelated, still-fully-connected concurrent series must be
-  // completely undisturbed by the other one's forfeit settling.
-  expect(unrelated.a.messages.slice(unrelatedACountBefore)).toHaveLength(0);
-  expect(unrelated.b.messages.slice(unrelatedBCountBefore)).toHaveLength(0);
+  // completely undisturbed by the OTHER series' forfeit settling
+  // specifically — it's still allowed to have timed out its OWN turn
+  // during this same wait (disconnectGraceMs here is deliberately longer
+  // than TURN_DURATION_MS — see this file's own top-of-file comment on
+  // that ordering — so a same-length live match easily can, and that's a
+  // real, unrelated "state" broadcast, not cross-series leakage). What
+  // must never appear is a seriesEnded for this pairing, or its status
+  // leaving "active".
+  const unrelatedANew = unrelated.a.messages.slice(unrelatedACountBefore);
+  const unrelatedBNew = unrelated.b.messages.slice(unrelatedBCountBefore);
+  expect(unrelatedANew.some((m) => m.type === "seriesEnded")).toBe(false);
+  expect(unrelatedBNew.some((m) => m.type === "seriesEnded")).toBe(false);
   expect(lastState(unrelated.a.messages)?.status).toBe("active");
 
   // The survivor's own session was released — rejoining the queue starts a
@@ -481,7 +504,6 @@ it("forfeits the WHOLE series to the survivor once the disconnected opponent's g
   await wait(100);
   expect(survivor.messages.filter((m) => m.type === "queued").length).toBeGreaterThan(0);
 
-  trigger.ws.close();
   survivor.ws.close();
   unrelated.a.ws.close();
   unrelated.b.ws.close();
